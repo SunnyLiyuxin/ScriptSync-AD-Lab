@@ -149,5 +149,7 @@ function parseDialogueLine(
     _lockedBy: null,
     _assignedTo: null,
     _owner: null,
+    _needsRevisionBy: null,
+    _needsRevisionByName: null,
   };
 }

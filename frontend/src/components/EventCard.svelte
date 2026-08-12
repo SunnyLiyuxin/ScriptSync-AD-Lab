@@ -39,20 +39,18 @@
   let newComment = $state('');
 
   const STATUS_LABELS: Record<EventStatus, string> = {
-    empty: '空白',
     draft: '初稿',
-    peer_review: '审阅中',
-    revision_needed: '需修改',
+    needs_revision: '需修改',
+    in_review: '审阅中',
     approved: '已通过',
     locked: '已锁定',
     deleted: '已删除',
   };
 
   const STATUS_COLORS: Record<EventStatus, string> = {
-    empty: '#8c959f',
     draft: '#0969da',
-    peer_review: '#d29922',
-    revision_needed: '#cf222e',
+    needs_revision: '#cf222e',
+    in_review: '#d29922',
     approved: '#1a7f37',
     locked: '#57606a',
     deleted: '#8c959f',

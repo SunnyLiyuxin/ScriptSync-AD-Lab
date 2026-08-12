@@ -33,10 +33,12 @@ export function createEvent(
   yMap.set('style', data.style || 'Narration');
   yMap.set('name', data.name || '');
   yMap.set('text', data.text || '');
-  yMap.set('_status', data._status || 'empty');
+  yMap.set('_status', data._status || 'draft');
   yMap.set('_lockedBy', null);
   yMap.set('_assignedTo', data._assignedTo ?? null);
   yMap.set('_owner', data._owner ?? null);
+  yMap.set('_needsRevisionBy', null);
+  yMap.set('_needsRevisionByName', null);
 
   // 按时间插入到正确位置（保持有序，便于渲染与重叠检测）
   let idx = events.length;
@@ -91,10 +93,6 @@ export function updateText(doc: Y.Doc, eventId: string, text: string, currentUse
   if (!e) return false;
   if (!canEdit(e, currentUserId, role)) return false; // 权限校验
   e.set('text', text);
-  // empty 状态写入文字后自动转 draft
-  if ((e.get('_status') as EventStatus) === 'empty') {
-    e.set('_status', 'draft');
-  }
   return true;
 }
 
@@ -143,38 +141,43 @@ export function softDeleteEvent(doc: Y.Doc, eventId: string, currentUserId: stri
   if (!e) return false;
   if (!canEdit(e, currentUserId, role)) return false; // 权限校验
   e.set('_status', 'deleted');
+  e.set('_needsRevisionBy', null);
+  e.set('_needsRevisionByName', null);
   return true;
 }
 
 /**
- * 状态机流转
- * empty → draft → peer_review → approved → locked
- *                 ↘ revision_needed → draft
+ * 设置条目状态（权限驱动 + needs_revision 头像标记）
+ * - owner：可设置 needs_revision / in_review / approved / locked / deleted
+ * - 普通成员（含段落负责人）：仅可设置 needs_revision，并记录其 userId/username 用于头像显示
+ * - owner 操作不显示头像；状态离开 needs_revision 时清除头像标记
+ * @returns true=成功, false=无权限或条目不存在
  */
-const VALID_TRANSITIONS: Record<EventStatus, EventStatus[]> = {
-  empty: ['draft'],
-  draft: ['peer_review', 'deleted'],
-  peer_review: ['approved', 'revision_needed'],
-  revision_needed: ['draft'],
-  approved: ['locked', 'revision_needed'],
-  locked: ['approved'], // 解锁回 approved
-  deleted: ['draft'], // 恢复
-};
-
-export function transitionStatus(
+export function setStatus(
   doc: Y.Doc,
   eventId: string,
   newStatus: EventStatus,
-  currentUserId: string,
-  role?: string,
+  currentUser: { userId: string; username: string },
+  isOwner: boolean,
 ): boolean {
   const e = findEvent(doc, eventId);
   if (!e) return false;
-  if (!canEdit(e, currentUserId, role)) return false; // 权限校验
-  const cur = e.get('_status') as EventStatus;
-  const allowed = VALID_TRANSITIONS[cur];
-  if (!allowed || !allowed.includes(newStatus)) return false;
+  const ownerAllowed: EventStatus[] = ['needs_revision', 'in_review', 'approved', 'locked', 'deleted'];
+  if (isOwner) {
+    if (!ownerAllowed.includes(newStatus)) return false;
+  } else {
+    if (newStatus !== 'needs_revision') return false;
+  }
   e.set('_status', newStatus);
+  if (newStatus === 'needs_revision' && !isOwner) {
+    // 普通成员标记需修改 → 记录头像
+    e.set('_needsRevisionBy', currentUser.userId);
+    e.set('_needsRevisionByName', currentUser.username);
+  } else {
+    // owner 设置 needs_revision 不留头像；任何非 needs_revision 状态清除头像
+    e.set('_needsRevisionBy', null);
+    e.set('_needsRevisionByName', null);
+  }
   return true;
 }
 
@@ -393,6 +396,8 @@ export function importEvents(doc: Y.Doc, events: AssEvent[]): void {
       m.set('_lockedBy', null);
       m.set('_assignedTo', e._assignedTo ?? null);
       m.set('_owner', e._owner ?? null);
+      m.set('_needsRevisionBy', null);
+      m.set('_needsRevisionByName', null);
       return m;
     });
     yEvents.push(yMaps);
@@ -453,6 +458,8 @@ export function importEventsMerge(
       m.set('_lockedBy', null);
       m.set('_assignedTo', e._assignedTo ?? null);
       m.set('_owner', e._owner ?? null);
+      m.set('_needsRevisionBy', null);
+      m.set('_needsRevisionByName', null);
 
       // 找到第一个 start 大于当前条目 start 的位置插入
       let idx = yEvents.length;
@@ -490,6 +497,8 @@ export function exportEvents(doc: Y.Doc): AssEvent[] {
       _lockedBy: (e.get('_lockedBy') as string | null) ?? null,
       _assignedTo: (e.get('_assignedTo') as string | null) ?? null,
       _owner: (e.get('_owner') as string | null) ?? null,
+      _needsRevisionBy: (e.get('_needsRevisionBy') as string | null) ?? null,
+      _needsRevisionByName: (e.get('_needsRevisionByName') as string | null) ?? null,
     });
   }
   return result.sort((a, b) => a.start - b.start);

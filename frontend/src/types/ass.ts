@@ -5,13 +5,12 @@
 
 /** 字幕条目状态机：口述稿全流程流转状态 */
 export type EventStatus =
-  | 'empty'          // 空白占位（刚打轴生成，待撰写）
-  | 'draft'          // 初稿撰写中
-  | 'peer_review'    // 交叉审阅中
-  | 'revision_needed'// 审阅打回，需修改
-  | 'approved'       // 审阅通过
-  | 'locked'         // 定稿锁定
-  | 'deleted';       // 软删除（协作中可恢复）
+  | 'draft'          // 初稿
+  | 'needs_revision' // 需修改
+  | 'in_review'      // 审阅中
+  | 'approved'       // 已通过
+  | 'locked'         // 已锁定
+  | 'deleted';       // 已删除（可由 owner 恢复）
 
 /** ASS 内联标签解析结果 */
 export interface InlineTagResult {
@@ -62,6 +61,8 @@ export interface AssEvent {
   _lockedBy: string | null;       // 当前持有锁的用户ID
   _assignedTo: string | null;     // 被指派的口述员ID
   _owner: string | null;          // 导入者ID（内容归属，用于「只看自己」过滤）
+  _needsRevisionBy: string | null;      // 标记 needs_revision 的普通成员 userId（仅该状态显示头像）
+  _needsRevisionByName: string | null;  // 对应昵称（头像首字）
 
   // —— V1.5 预留字段（梯度升级时不破坏现有数据结构）——
   _reviewComments?: ReviewComment[];  // 审阅批注

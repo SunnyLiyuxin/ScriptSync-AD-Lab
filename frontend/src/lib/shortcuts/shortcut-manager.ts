@@ -186,7 +186,7 @@ export const DEFAULT_SHORTCUTS: ReadonlyArray<{ key: string; description: string
   { key: 'Ctrl+ArrowRight', description: '当前行开始时间前进0.1秒' },
   { key: 'Ctrl+Shift+ArrowLeft', description: '当前行结束时间后退0.1秒' },
   { key: 'Ctrl+Shift+ArrowRight', description: '当前行结束时间前进0.1秒' },
-  { key: 'Ctrl+Enter', description: '提交当前行到审阅状态（draft → peer_review）' },
+  { key: 'Ctrl+Enter', description: '提交当前行到审阅状态（仅 owner，→ in_review）' },
   { key: 'Ctrl+J', description: '跳转到下一个空白口述行' },
   { key: 'Ctrl+K', description: '跳转到上一个空白口述行' },
   { key: 'Escape', description: '取消编辑/取消选中' },

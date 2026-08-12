@@ -25,7 +25,7 @@
   import { type WaveformData } from '../lib/audio/audio-analyzer';
   import { detectSilence, markOccupiedRegions, type SilenceRegion } from '../lib/audio/silence-detector';
   import { findNextBlank, findPrevBlank } from '../lib/audio/jump-blank';
-  import { exportEvents, createEvent, updateText, updateTime, transitionStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, addComment, getComments } from '../lib/collaboration/yjs-operations';
+  import { exportEvents, createEvent, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, addComment, getComments } from '../lib/collaboration/yjs-operations';
   import { lockEntry, unlockEntry, getLockHolder, getOnlineUsers, getOtherCursors } from '../lib/collaboration/awareness-lock';
   import { createShortcutManager, createDefaultShortcuts } from '../lib/shortcuts/shortcut-manager';
   import { recordEdit, getEditHistory } from '../lib/collaboration/edit-history';
@@ -116,12 +116,12 @@
   let tableBodyEl: HTMLElement | null = $state(null);
 
   const STATUS_LABELS: Record<EventStatus, string> = {
-    empty: '空白', draft: '初稿', peer_review: '审阅中',
-    revision_needed: '需修改', approved: '已通过', locked: '已锁定', deleted: '已删除',
+    draft: '初稿', needs_revision: '需修改', in_review: '审阅中',
+    approved: '已通过', locked: '已锁定', deleted: '已删除',
   };
   const STATUS_COLORS: Record<EventStatus, string> = {
-    empty: '#8c959f', draft: '#0969da', peer_review: '#d29922',
-    revision_needed: '#cf222e', approved: '#1a7f37', locked: '#57606a', deleted: '#8c959f',
+    draft: '#0969da', needs_revision: '#cf222e', in_review: '#d29922',
+    approved: '#1a7f37', locked: '#57606a', deleted: '#8c959f',
   };
 
   // 订阅 Yjs
@@ -427,6 +427,78 @@
   // 勾选行对应的 AssEvent（用于 AI 检测范围）
   let checkedEvents = $derived(events.filter(e => checkedIds.has(e.id)));
 
+  // ===== 批量选择面板（行号范围 / 时间范围 / 按负责人）=====
+  let showBatchPanel = $state(false);
+  let batchRowStart = $state('');
+  let batchRowEnd = $state('');
+  let batchTimeStart = $state('');
+  let batchTimeEnd = $state('');
+  let batchAssignee = $state('');
+
+  function selectByRowRange() {
+    const s = parseInt(batchRowStart, 10);
+    const e = parseInt(batchRowEnd, 10);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || s < 1 || e < s || s > events.length) {
+      alert('行号无效：起始 ≥ 1，结束 ≥ 起始，且不超过总行数');
+      return;
+    }
+    const next = new Set(checkedIds);
+    for (let i = s - 1; i <= Math.min(e, events.length) - 1; i++) {
+      if (i >= 0) next.add(events[i].id);
+    }
+    checkedIds = next;
+  }
+
+  function selectByTimeRange() {
+    const ts = parseFloat(batchTimeStart);
+    const te = parseFloat(batchTimeEnd);
+    if (isNaN(ts) || isNaN(te) || te < ts) {
+      alert('时间范围无效：起始 ≤ 结束（秒）');
+      return;
+    }
+    const next = new Set(checkedIds);
+    for (const ev of events) {
+      if (ev._status === 'deleted') continue;
+      // 区间相交即选中
+      if (ev.start <= te && ev.end >= ts) next.add(ev.id);
+    }
+    checkedIds = next;
+  }
+
+  function selectByAssignee() {
+    if (!batchAssignee) return;
+    const next = new Set(checkedIds);
+    for (const ev of events) {
+      if (ev._assignedTo === batchAssignee) next.add(ev.id);
+    }
+    checkedIds = next;
+  }
+
+  function clearSelection() {
+    checkedIds = new Set();
+  }
+
+  // 批量设状态（owner 可设 5 种；普通成员仅 needs_revision）
+  function batchSetStatus(status: EventStatus) {
+    if (checkedIds.size === 0) {
+      alert('请先勾选或选择条目');
+      return;
+    }
+    const isOwner = myRole === 'owner';
+    const ids = Array.from(checkedIds);
+    doc.transact(() => {
+      for (const id of ids) {
+        const ev = events.find(x => x.id === id);
+        if (!ev) continue;
+        const oldStatus = ev._status;
+        const ok = setStatus(doc, id, status, { userId, username }, isOwner);
+        if (ok && oldStatus !== status) {
+          recordEdit(doc, id, 'status', oldStatus, status, userId, username);
+        }
+      }
+    });
+  }
+
   // ===== 内联批注 =====
   function openInlineReview(eventId: string) {
     inlineReviewEventId = eventId;
@@ -618,13 +690,23 @@
     pendingChanges = {};
   }
 
-  // 状态流转
+  // 状态流转（权限驱动：owner 可设 5 种；普通成员仅 needs_revision，并记录头像）
   function onStatusChange(e: AssEvent, status: EventStatus) {
+    if (status === e._status) return;
+    const isOwner = myRole === 'owner';
     const oldStatus = e._status;
-    const ok = transitionStatus(doc, e.id, status, userId, myRole ?? undefined);
+    const ok = setStatus(doc, e.id, status, { userId, username }, isOwner);
     if (ok && oldStatus !== status) {
       recordEdit(doc, e.id, 'status', oldStatus, status, userId, username);
     }
+  }
+
+  // 判定当前用户能否将某条目设为目标状态（用于 select option 的 disabled）
+  function canSetStatus(status: EventStatus): boolean {
+    if (myRole === 'owner') {
+      return (['needs_revision', 'in_review', 'approved', 'locked', 'deleted'] as EventStatus[]).includes(status);
+    }
+    return status === 'needs_revision';
   }
 
   // 键盘导航：上下键切换行，Enter编辑，Esc取消
@@ -854,7 +936,7 @@
       end: waveformPickRange.end,
       style: 'Narration',
       text: '',
-      _status: 'empty',
+      _status: 'draft',
       _assignedTo: waveformPickUserId,
     });
     selectedId = newId;
@@ -1050,20 +1132,21 @@
         if (selectedId) {
           const e = events.find(x => x.id === selectedId);
           if (e) {
-            const newId = createEvent(doc, { layer: 1, start: currentTime, end: currentTime + 2, style: 'Narration', text: '', _status: 'empty', _assignedTo: userId });
+            const newId = createEvent(doc, { layer: 1, start: currentTime, end: currentTime + 2, style: 'Narration', text: '', _status: 'draft', _assignedTo: userId });
             selectedId = newId;
           }
         } else {
-          const newId = createEvent(doc, { layer: 1, start: currentTime, end: currentTime + 2, style: 'Narration', text: '', _status: 'empty', _assignedTo: userId });
+          const newId = createEvent(doc, { layer: 1, start: currentTime, end: currentTime + 2, style: 'Narration', text: '', _status: 'draft', _assignedTo: userId });
           selectedId = newId;
         }
       },
       deleteRow: () => {
         if (!selectedId) return;
+        if (myRole !== 'owner') { alert('仅项目创建者可删除条目'); return; }
         const e = events.find(x => x.id === selectedId);
-        if (!e || !canEdit(e)) return;
-        if (confirm('确认软删除此行？（deleted 状态，可在状态机中恢复为 draft）')) {
-          softDeleteEvent(doc, selectedId, userId, myRole ?? undefined);
+        if (!e) return;
+        if (confirm('确认删除此行？（deleted 状态，owner 可恢复）')) {
+          setStatus(doc, selectedId, 'deleted', { userId, username }, true);
           selectedId = null;
         }
       },
@@ -1076,7 +1159,7 @@
         const oldEnd = e.end;
         updateTime(doc, selectedId, e.start, mid, userId, myRole ?? undefined);
         recordEdit(doc, selectedId, 'end', String(oldEnd), String(mid), userId, username);
-        createEvent(doc, { layer: e.layer, start: mid, end: oldEnd, style: e.style, text: '', _status: 'empty', _assignedTo: userId });
+        createEvent(doc, { layer: e.layer, start: mid, end: oldEnd, style: e.style, text: '', _status: 'draft', _assignedTo: userId });
       },
       moveDown: () => {
         if (!selectedId) return;
@@ -1110,8 +1193,8 @@
       },
       submitForReview: () => {
         if (!selectedId) return;
-        const e = events.find(x => x.id === selectedId);
-        if (e && canEdit(e)) transitionStatus(doc, selectedId, 'peer_review', userId, myRole ?? undefined);
+        if (myRole !== 'owner') return; // 仅 owner 可推进到审阅中
+        setStatus(doc, selectedId, 'in_review', { userId, username }, true);
       },
       jumpNextBlank: () => {
         const r = findNextBlank(events, silenceRegions, currentTime);
@@ -1169,7 +1252,7 @@
       dragSelectEnabled={waveformDragMode}
       on:seek={(e) => onSeek(e.detail)}
       on:createEntry={(e) => {
-        const id = createEvent(doc, { layer: 1, start: e.detail.start, end: e.detail.end, style: 'Narration', text: '', _status: 'empty', _assignedTo: userId });
+        const id = createEvent(doc, { layer: 1, start: e.detail.start, end: e.detail.end, style: 'Narration', text: '', _status: 'draft', _assignedTo: userId });
         selectedId = id;
       }}
       on:selectRange={(e) => openWaveformAssignModal(e.detail)}
@@ -1219,6 +1302,7 @@
           导入ASS
           <input type="file" accept=".ass" on:change={onImportAss} hidden />
         </label>
+        <button class="btn btn-tool" class:active={showBatchPanel} on:click={() => showBatchPanel = !showBatchPanel} title="批量选择与设状态">批量 ({checkedIds.size})</button>
         {#if can('assign_work')}
           <button class="btn btn-tool" on:click={openAssignModal} title="批量指派（先勾选行）" disabled={checkedIds.size === 0}>
             指派 ({checkedIds.size})
@@ -1279,6 +1363,49 @@
       <span class="online-count">🟢 {onlineUsers.length} 人在线</span>
       <span class="checked-count">☑ 已勾选 {checkedIds.size}</span>
     </div>
+
+    <!-- 批量选择与设状态面板 -->
+    {#if showBatchPanel}
+      <div class="batch-panel">
+        <div class="batch-row">
+          <span class="batch-label">行号范围</span>
+          <input type="number" min="1" bind:value={batchRowStart} placeholder="起始行" />
+          <span class="batch-sep">-</span>
+          <input type="number" min="1" bind:value={batchRowEnd} placeholder="结束行" />
+          <button class="btn btn-small" on:click={selectByRowRange}>勾选</button>
+        </div>
+        <div class="batch-row">
+          <span class="batch-label">时间范围(秒)</span>
+          <input type="number" step="0.1" min="0" bind:value={batchTimeStart} placeholder="起始秒" />
+          <span class="batch-sep">-</span>
+          <input type="number" step="0.1" min="0" bind:value={batchTimeEnd} placeholder="结束秒" />
+          <button class="btn btn-small" on:click={selectByTimeRange}>勾选</button>
+        </div>
+        {#if myRole === 'owner'}
+          <div class="batch-row">
+            <span class="batch-label">按负责人</span>
+            <select bind:value={batchAssignee}>
+              <option value="">选择成员</option>
+              {#each allKnownMembers as m (m.userId)}
+                <option value={m.userId}>{m.username}</option>
+              {/each}
+            </select>
+            <button class="btn btn-small" on:click={selectByAssignee} disabled={!batchAssignee}>勾选</button>
+          </div>
+        {/if}
+        <div class="batch-row batch-status-row">
+          <span class="batch-label">批量设状态（已选 {checkedIds.size}）</span>
+          <button class="btn btn-small" on:click={() => batchSetStatus('needs_revision')}>需修改</button>
+          {#if myRole === 'owner'}
+            <button class="btn btn-small" on:click={() => batchSetStatus('in_review')}>审阅中</button>
+            <button class="btn btn-small" on:click={() => batchSetStatus('approved')}>已通过</button>
+            <button class="btn btn-small" on:click={() => batchSetStatus('locked')}>已锁定</button>
+            <button class="btn btn-small btn-danger" on:click={() => batchSetStatus('deleted')}>删除</button>
+          {/if}
+          <button class="btn btn-small btn-cancel" on:click={clearSelection}>清空选择</button>
+        </div>
+      </div>
+    {/if}
 
     <!-- 在线用户头像（圆形昵称首字，绑定真实 awareness） -->
     <div class="online-users">
@@ -1393,18 +1520,18 @@
                 {/if}
               </td>
               <td class="col-status">
-                {#if canEdit(e)}
-                  <select
-                    value={e._status}
-                    on:change={(ev) => onStatusChange(e, ev.currentTarget.value as EventStatus)}
-                    on:click|stopPropagation
-                  >
-                    {#each Object.entries(STATUS_LABELS) as [value, label]}
-                      <option value={value}>{label}</option>
-                    {/each}
-                  </select>
-                {:else}
-                  <span class="status-badge" style="background: {STATUS_COLORS[e._status]}">{STATUS_LABELS[e._status]}</span>
+                <select
+                  value={e._status}
+                  on:change={(ev) => onStatusChange(e, ev.currentTarget.value as EventStatus)}
+                  on:click|stopPropagation
+                  title="状态（仅可选允许的状态）"
+                >
+                  {#each Object.entries(STATUS_LABELS) as [value, label]}
+                    <option value={value} disabled={!canSetStatus(value as EventStatus)}>{label}</option>
+                  {/each}
+                </select>
+                {#if e._status === 'needs_revision' && e._needsRevisionBy}
+                  <div class="status-avatar" title="{e._needsRevisionByName} 标记需修改" style="background: {avatarColor(e._needsRevisionBy)}">{initialOf(e._needsRevisionByName || '')}</div>
                 {/if}
               </td>
             </tr>
@@ -1807,6 +1934,23 @@
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-cancel { background: #e1e4e8; color: #57606a; }
   .btn-cancel:hover { background: #d0d7de; }
+  .btn-small { padding: 3px 8px; font-size: 11px; background: #0969da; }
+  .btn-small:hover:not(:disabled) { background: #0860c7; }
+  .btn-small:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-small.btn-danger { background: #cf222e; }
+  .btn-small.btn-danger:hover { background: #a40e26; }
+  .btn-small.btn-cancel { background: #e1e4e8; color: #57606a; }
+  /* 批量选择与设状态面板 */
+  .batch-panel {
+    background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+    padding: 10px 12px; margin: 6px 0; display: flex; flex-direction: column; gap: 8px;
+  }
+  .batch-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .batch-label { font-size: 12px; color: #57606a; font-weight: 600; min-width: 84px; }
+  .batch-row input, .batch-row select { padding: 4px 6px; border: 1px solid #d0d7de; border-radius: 3px; font-size: 12px; width: 90px; }
+  .batch-row select { width: 130px; background: white; }
+  .batch-sep { color: #8c959f; }
+  .batch-status-row { padding-top: 6px; border-top: 1px dashed #d0d7de; }
   .btn-import { background: #0969da; }
   .btn-import:hover { background: #0860c7; }
   .btn-video { background: #1a7f37; }
@@ -1901,7 +2045,15 @@
   .col-assignee { width: 60px; color: #57606a; }
   .col-text { min-width: 0; display: flex; align-items: center; gap: 2px; }
   .col-text .text-cell { flex: 1; min-width: 0; }
-  .col-status { width: 80px; }
+  .col-status { width: 110px; display: flex; align-items: center; gap: 4px; }
+  .col-status select { font-size: 12px; padding: 3px 4px; max-width: 78px; }
+  /* needs_revision 状态：操作者头像（圆形昵称首字），实时随状态出现/消失 */
+  .status-avatar {
+    width: 18px; height: 18px; border-radius: 50%;
+    color: white; font-size: 10px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; box-shadow: 0 0 0 1.5px white, 0 0 0 2px #cf222e;
+  }
   .layer-badge {
     padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 500;
   }
