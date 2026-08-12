@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 import jwt
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, BackgroundTasks, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, BackgroundTasks, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -128,6 +128,52 @@ def verify_token(authorization: Optional[str] = Header(None)) -> dict:
         raise HTTPException(401, "Invalid token")
 
 
+# ============ 角色权限矩阵 ============
+# 角色：owner（统筹）/ manager（管理员，可分配工作）/ reviewer（审阅）/ narrator（口述员）
+# MVP 不做 guest（只读观察者），V2 视需求补
+VALID_ROLES = {'owner', 'manager', 'reviewer', 'narrator'}
+
+
+def get_member_role(project_id: str, user_id: str) -> Optional[str]:
+    """查询某用户在某项目中的角色，非成员返回 None"""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT role FROM members WHERE project_id=? AND user_id=?",
+            (project_id, user_id),
+        ).fetchone()
+        return row['role'] if row else None
+    finally:
+        conn.close()
+
+
+def require_project_role(project_id_param: str, allowed_roles: set):
+    """FastAPI 依赖工厂：校验当前用户在指定项目中具备允许的角色之一
+
+    用法：
+        @app.post("/api/projects/{project_id}/members")
+        def add_member(project_id: str, ..., ctx: dict = Depends(require_project_role('project_id', {'owner', 'manager'}))):
+            user = ctx['user']
+            ...
+    返回 {user, role} 供端点内使用。
+    """
+    def dependency(
+        request: Request,
+        user: dict = Depends(verify_token),
+    ) -> dict:
+        # 从路径参数取 project_id
+        project_id = request.path_params.get(project_id_param)
+        if not project_id:
+            raise HTTPException(400, f"Missing path param: {project_id_param}")
+        role = get_member_role(project_id, user['userId'])
+        if role is None:
+            raise HTTPException(403, "非项目成员")
+        if role not in allowed_roles:
+            raise HTTPException(403, f"权限不足（需要 {','.join(sorted(allowed_roles))}，当前 {role}）")
+        return {'user': user, 'role': role}
+    return dependency
+
+
 # ============ Pydantic 模型 ============
 
 class ProjectCreate(BaseModel):
@@ -138,6 +184,21 @@ class ProjectCreate(BaseModel):
 class ProjectMemberAdd(BaseModel):
     username: str
     role: str = 'narrator'
+    user_id: Optional[str] = None  # 可选：MVP 阶段前端从 awareness 在线列表选用户时直接传 userId，避免占位 uuid 无法匹配真实身份
+
+
+class ProjectMemberUpdate(BaseModel):
+    role: str
+
+
+class ProjectMemberRemove(BaseModel):
+    """仅用于文档说明，DELETE 走路径参数"""
+
+
+class BulkAssignRequest(BaseModel):
+    """工作分配：批量指派（阶段4）"""
+    event_ids: list[str]
+    assignee_user_id: Optional[str] = None  # None = 解除指派
 
 
 # ============ 项目 CRUD ============
@@ -200,19 +261,143 @@ def get_project(project_id: str, user: dict = Depends(verify_token)):
 
 
 @app.post("/api/projects/{project_id}/members")
-def add_member(project_id: str, data: ProjectMemberAdd, user: dict = Depends(verify_token)):
-    """添加成员"""
+def add_member(
+    project_id: str,
+    data: ProjectMemberAdd,
+    ctx: dict = Depends(require_project_role('project_id', {'owner', 'manager'})),
+):
+    """添加成员（仅 owner/manager 可调用）
+
+    MVP 阶段无独立用户系统，按 username 占位 user_id；阶段3 接入用户系统后改为按 userId 查询。
+    """
+    if data.role not in VALID_ROLES:
+        raise HTTPException(400, f"非法角色：{data.role}，可选 {','.join(sorted(VALID_ROLES))}")
+    if data.role == 'owner':
+        # 一个项目只允许一个 owner，禁止通过此接口添加 owner
+        raise HTTPException(400, "禁止通过此接口添加 owner（每个项目仅一个 owner）")
     conn = get_db()
     try:
-        # TODO: 实际场景应通过用户系统查找 userId，MVP 用 username 占位
+        # 防重复：同 userId 或同 username 已在该项目则返回提示
+        if data.user_id:
+            existed = conn.execute(
+                "SELECT id FROM members WHERE project_id=? AND user_id=?",
+                (project_id, data.user_id),
+            ).fetchone()
+            if existed:
+                raise HTTPException(409, f"成员 {data.username} 已在该项目中")
+        else:
+            existed = conn.execute(
+                "SELECT id FROM members WHERE project_id=? AND username=?",
+                (project_id, data.username),
+            ).fetchone()
+            if existed:
+                raise HTTPException(409, f"成员 {data.username} 已在该项目中")
+        # MVP：优先用前端传入的 userId（来自 awareness 在线列表）；
+        # 阶段5 用户系统上线后改为按 username 反查 users 表
+        final_user_id = data.user_id or str(uuid.uuid4())
         conn.execute(
             "INSERT INTO members (id, project_id, user_id, username, role, joined_at) VALUES (?,?,?,?,?,?)",
-            (str(uuid.uuid4()), project_id, str(uuid.uuid4()), data.username, data.role, int(time.time())),
+            (str(uuid.uuid4()), project_id, final_user_id, data.username, data.role, int(time.time())),
         )
         conn.commit()
     finally:
         conn.close()
     return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/members")
+def list_members(
+    project_id: str,
+    ctx: dict = Depends(require_project_role('project_id', VALID_ROLES)),
+):
+    """列出项目所有成员（含角色）"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT user_id, username, role, joined_at FROM members WHERE project_id=? ORDER BY joined_at ASC",
+            (project_id,),
+        ).fetchall()
+        return {"members": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.get("/api/projects/{project_id}/my-role")
+def get_my_role(
+    project_id: str,
+    user: dict = Depends(verify_token),
+):
+    """查询当前用户在该项目中的角色（首屏拉一次缓存）"""
+    role = get_member_role(project_id, user['userId'])
+    if role is None:
+        raise HTTPException(403, "非项目成员")
+    return {"role": role, "userId": user['userId'], "username": user.get('username', '')}
+
+
+@app.patch("/api/projects/{project_id}/members/{member_user_id}")
+def update_member_role(
+    project_id: str,
+    member_user_id: str,
+    data: ProjectMemberUpdate,
+    ctx: dict = Depends(require_project_role('project_id', {'owner'})),
+):
+    """修改成员角色（仅 owner 可调用）
+
+    禁止修改 owner 角色（owner 转让走专门的 transfer 接口，MVP 暂不实现）。
+    """
+    if data.role not in VALID_ROLES:
+        raise HTTPException(400, f"非法角色：{data.role}")
+    if data.role == 'owner':
+        raise HTTPException(400, "禁止通过此接口设置为 owner（请用转让接口）")
+    conn = get_db()
+    try:
+        # 校验目标成员存在且非 owner
+        target = conn.execute(
+            "SELECT role FROM members WHERE project_id=? AND user_id=?",
+            (project_id, member_user_id),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "成员不存在")
+        if target['role'] == 'owner':
+            raise HTTPException(400, "禁止修改 owner 角色")
+        conn.execute(
+            "UPDATE members SET role=? WHERE project_id=? AND user_id=?",
+            (data.role, project_id, member_user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "userId": member_user_id, "role": data.role}
+
+
+@app.delete("/api/projects/{project_id}/members/{member_user_id}")
+def remove_member(
+    project_id: str,
+    member_user_id: str,
+    ctx: dict = Depends(require_project_role('project_id', {'owner'})),
+):
+    """移除成员（仅 owner 可调用）
+
+    禁止移除 owner（项目创建者不可被移除，需先转让 owner）。
+    """
+    conn = get_db()
+    try:
+        target = conn.execute(
+            "SELECT role FROM members WHERE project_id=? AND user_id=?",
+            (project_id, member_user_id),
+        ).fetchone()
+        if not target:
+            raise HTTPException(404, "成员不存在")
+        if target['role'] == 'owner':
+            raise HTTPException(400, "禁止移除 owner")
+        conn.execute(
+            "DELETE FROM members WHERE project_id=? AND user_id=?",
+            (project_id, member_user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "removedUserId": member_user_id}
 
 
 # ============ 协作 token 签发 ============

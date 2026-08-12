@@ -6,7 +6,7 @@
    * - 演练态：一人控制，众人跟随（通过 awareness 同步播放状态）
    * 片源由负责人上传云端，所有人从同一 URL 加载，但播放进度独立
    */
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
 
   interface Props {
     src: string;
@@ -23,8 +23,29 @@
   let muted = $state(false);
   let showControls = $state(true);
   let hideTimer: ReturnType<typeof setTimeout> | null = null;
+  let rafId: number | null = null;
 
   const dispatch = createEventDispatcher();
+
+  // 用 requestAnimationFrame 高频同步 currentTime（60fps），
+  // 替代 video 原生 timeupdate 事件（仅 ~4Hz），让波形播放头平滑移动。
+  function startRafSync() {
+    if (rafId !== null) return;
+    const tick = () => {
+      if (videoEl) {
+        currentTime = videoEl.currentTime;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+  }
+  function stopRafSync() {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (videoEl) currentTime = videoEl.currentTime; // 最后一次同步
+  }
 
   function onTimeUpdate() {
     if (!videoEl) return;
@@ -34,11 +55,13 @@
 
   function onPlay() {
     isPlaying = true;
+    startRafSync();
     dispatch('playStateChange', { isPlaying: true, currentTime });
   }
 
   function onPause() {
     isPlaying = false;
+    stopRafSync();
     dispatch('playStateChange', { isPlaying: false, currentTime });
   }
 
@@ -109,6 +132,8 @@
   export function seekTo(t: number) { seek(t); }
   export function getCurrentTime(): number { return videoEl?.currentTime ?? 0; }
   export function getIsPlaying(): boolean { return isPlaying; }
+
+  onDestroy(() => stopRafSync());
 </script>
 
 <svelte:window on:keydown={onKeydown} />

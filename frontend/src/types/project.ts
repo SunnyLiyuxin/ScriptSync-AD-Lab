@@ -1,8 +1,11 @@
-/**
- * 项目与协作相关类型定义
- */
+/** 项目与协作相关类型定义 */
 
-/** 项目成员角色 */
+/** 项目成员角色
+ * - owner：发起人/统筹，项目创建者，独有 owner 转让/移除成员/版本管理等权限
+ * - manager：管理员，可分配工作、添加成员（不能改 owner/移除 owner）
+ * - reviewer：审阅人，可批注可编辑他人行
+ * - narrator：口述员，默认角色，仅可编辑自己负责的行
+ */
 export type MemberRole = 'owner' | 'manager' | 'narrator' | 'reviewer';
 
 /** 项目成员 */
@@ -12,6 +15,49 @@ export interface ProjectMember {
   role: MemberRole;
   joinedAt: number;
 }
+
+/** 权限位（与后端 require_project_role 对齐） */
+export type Permission =
+  | 'manage_members'      // 添加/移除/改成员角色
+  | 'assign_work'         // 分配工作（批量指派、波形拖选）
+  | 'edit_others_rows'    // 编辑他人负责的行
+  | 'edit_own_rows'       // 编辑自己负责的行
+  | 'comment'             // 批注
+  | 'export'              // 导出
+  | 'version_manage'      // 版本管理（创建快照/回滚）
+  | 'view_all_rows';      // 查看所有行
+
+/** 角色权限矩阵（与定位报告第九章一致） */
+export const ROLE_PERMISSIONS: Record<MemberRole, Set<Permission>> = {
+  owner: new Set<Permission>([
+    'manage_members', 'assign_work', 'edit_others_rows', 'edit_own_rows',
+    'comment', 'export', 'version_manage', 'view_all_rows',
+  ]),
+  manager: new Set<Permission>([
+    'assign_work', 'edit_others_rows', 'edit_own_rows',
+    'comment', 'export', 'view_all_rows',
+  ]),
+  reviewer: new Set<Permission>([
+    'edit_others_rows', 'edit_own_rows', 'comment', 'export', 'view_all_rows',
+  ]),
+  narrator: new Set<Permission>([
+    'edit_own_rows', 'comment', 'export', 'view_all_rows',
+  ]),
+};
+
+/** 权限判定工具 */
+export function hasPermission(role: MemberRole | null | undefined, perm: Permission): boolean {
+  if (!role) return false;
+  return ROLE_PERMISSIONS[role]?.has(perm) ?? false;
+}
+
+/** 角色中文标签 */
+export const ROLE_LABELS: Record<MemberRole, string> = {
+  owner: '统筹',
+  manager: '管理员',
+  reviewer: '审阅',
+  narrator: '口述员',
+};
 
 /** 项目元数据（存 RDS，非 Yjs） */
 export interface Project {

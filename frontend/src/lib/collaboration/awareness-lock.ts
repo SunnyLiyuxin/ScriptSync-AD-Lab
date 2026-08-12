@@ -104,3 +104,25 @@ export function getOnlineUsers(
   }
   return users;
 }
+
+/**
+ * 获取所有「他人」正在编辑的光标位置
+ * @param myUserId 当前用户 userId，用于排除自己
+ * @returns Map<entryId, { userId, username, color }>，同一行多人编辑时取最后写入者
+ */
+export function getOtherCursors(
+  provider: WebsocketProvider,
+  myUserId: string,
+): Map<string, { userId: string; username: string; color: string }> {
+  const result = new Map<string, { userId: string; username: string; color: string }>();
+  const states = provider.awareness.getStates();
+  for (const [, state] of states.entries()) {
+    const cursor = state.cursor as AwarenessState['cursor'] | undefined;
+    const user = state.user as { userId: string; username: string; color: string } | undefined;
+    if (cursor?.entryId && cursor.typing && user && user.userId !== myUserId) {
+      // 多人编辑同一行时，后者覆盖前者（awareness 无序，UI 层足够提示「有人在编辑」）
+      result.set(cursor.entryId, { userId: user.userId, username: user.username, color: user.color });
+    }
+  }
+  return result;
+}

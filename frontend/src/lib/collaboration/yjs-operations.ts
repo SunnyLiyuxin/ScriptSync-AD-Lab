@@ -65,9 +65,15 @@ function findEvent(doc: Y.Doc, eventId: string): YEvent | null {
  * 权限校验：只有 _assignedTo === currentUserId 才能编辑
  * 这是"防误删/误修改他人部分"机制的核心——数据层校验，不依赖 UI 隐藏
  * 即使前端 UI 被绕过（如控制台直接调用），数据层也拒绝写入
+ *
+ * 注：阶段3 接入角色矩阵后，owner/manager/reviewer 可编辑他人行。
+ * 此处保留原"仅负责人可编辑"作为数据层底线；角色放权在前端 hasPermission 判定。
+ * 数据层接受一个可选 role 参数，若 role 具备 edit_others_rows 则放行他人行。
  */
-function canEdit(e: YEvent, currentUserId: string): boolean {
+function canEdit(e: YEvent, currentUserId: string, role?: string): boolean {
   const assignedTo = e.get('_assignedTo') as string | null;
+  // 角色放权：owner/manager/reviewer 可编辑他人行
+  if (role === 'owner' || role === 'manager' || role === 'reviewer') return true;
   // 已分配：只有负责人可编辑
   if (assignedTo !== null) return assignedTo === currentUserId;
   // 未分配：暂不允许普通编辑（等负责人分配后才能编辑）
@@ -77,11 +83,12 @@ function canEdit(e: YEvent, currentUserId: string): boolean {
 /**
  * 编辑字幕文本（Yjs CRDT 自动合并并发编辑）
  * @param currentUserId 当前用户ID，用于权限校验
+ * @param role 当前用户角色（可选，阶段3 角色放权）
  */
-export function updateText(doc: Y.Doc, eventId: string, text: string, currentUserId: string): boolean {
+export function updateText(doc: Y.Doc, eventId: string, text: string, currentUserId: string, role?: string): boolean {
   const e = findEvent(doc, eventId);
   if (!e) return false;
-  if (!canEdit(e, currentUserId)) return false; // 权限校验
+  if (!canEdit(e, currentUserId, role)) return false; // 权限校验
   e.set('text', text);
   // empty 状态写入文字后自动转 draft
   if ((e.get('_status') as EventStatus) === 'empty') {
@@ -101,12 +108,13 @@ export function updateTime(
   start: number,
   end: number,
   currentUserId: string,
+  role?: string,
 ): boolean {
   if (end < start) return false; // 自身非法
 
   const target = findEvent(doc, eventId);
   if (!target) return false;
-  if (!canEdit(target, currentUserId)) return false; // 权限校验
+  if (!canEdit(target, currentUserId, role)) return false; // 权限校验
 
   const events = doc.getArray<YEvent>('events');
   // 重叠检测：与同 layer 的其他条目不能时间交叉
@@ -129,10 +137,10 @@ export function updateTime(
 /**
  * 软删除（协作中可恢复）+ 权限校验
  */
-export function softDeleteEvent(doc: Y.Doc, eventId: string, currentUserId: string): boolean {
+export function softDeleteEvent(doc: Y.Doc, eventId: string, currentUserId: string, role?: string): boolean {
   const e = findEvent(doc, eventId);
   if (!e) return false;
-  if (!canEdit(e, currentUserId)) return false; // 权限校验
+  if (!canEdit(e, currentUserId, role)) return false; // 权限校验
   e.set('_status', 'deleted');
   return true;
 }
@@ -157,10 +165,11 @@ export function transitionStatus(
   eventId: string,
   newStatus: EventStatus,
   currentUserId: string,
+  role?: string,
 ): boolean {
   const e = findEvent(doc, eventId);
   if (!e) return false;
-  if (!canEdit(e, currentUserId)) return false; // 权限校验
+  if (!canEdit(e, currentUserId, role)) return false; // 权限校验
   const cur = e.get('_status') as EventStatus;
   const allowed = VALID_TRANSITIONS[cur];
   if (!allowed || !allowed.includes(newStatus)) return false;
@@ -170,6 +179,8 @@ export function transitionStatus(
 
 /**
  * 分配条目给口述员
+ * 注：调用方需在前端先校验 assign_work 权限（owner/manager）；
+ *     数据层不强制，因为 owner 转让或紧急情况下需要灵活指派。
  */
 export function assignEvent(
   doc: Y.Doc,
@@ -180,6 +191,28 @@ export function assignEvent(
   if (!e) return false;
   e.set('_assignedTo', userId);
   return true;
+}
+
+/**
+ * 批量分配多条目给同一口述员（阶段4 工作分配）
+ * 单事务执行，避免多次广播 update。
+ */
+export function assignEventsBulk(
+  doc: Y.Doc,
+  eventIds: string[],
+  userId: string | null,
+): number {
+  let count = 0;
+  doc.transact(() => {
+    for (const id of eventIds) {
+      const e = findEvent(doc, id);
+      if (e) {
+        e.set('_assignedTo', userId);
+        count++;
+      }
+    }
+  });
+  return count;
 }
 
 /**
