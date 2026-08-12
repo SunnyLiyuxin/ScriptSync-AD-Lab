@@ -61,6 +61,7 @@ export interface AssEvent {
   _status: EventStatus;
   _lockedBy: string | null;       // 当前持有锁的用户ID
   _assignedTo: string | null;     // 被指派的口述员ID
+  _owner: string | null;          // 导入者ID（内容归属，用于「只看自己」过滤）
 
   // —— V1.5 预留字段（梯度升级时不破坏现有数据结构）——
   _reviewComments?: ReviewComment[];  // 审阅批注

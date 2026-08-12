@@ -107,6 +107,24 @@ def init_db():
         data TEXT,
         FOREIGN KEY (project_id) REFERENCES projects(id)
     );
+    CREATE TABLE IF NOT EXISTS invitations (
+        code TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at INTEGER,
+        expires_at INTEGER,
+        max_uses INTEGER DEFAULT 0,
+        use_count INTEGER DEFAULT 0,
+        revoked INTEGER DEFAULT 0,
+        role TEXT DEFAULT 'narrator',
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at INTEGER
+    );
     """)
     conn.commit()
     conn.close()
@@ -428,6 +446,223 @@ def get_collab_token(project_id: str, user: dict = Depends(verify_token)):
         algorithm='HS256',
     )
     return {"token": token, "wsUrl": COLLAB_WS_URL, "roomName": project_id}
+
+
+# ============ 用户系统（阶段1：注册/登录/JWT）============
+
+import bcrypt
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/auth/register")
+def register(data: RegisterRequest):
+    """用户注册：username + password → bcrypt 存储，返回 JWT"""
+    username = data.username.strip()
+    if not username or not data.password:
+        raise HTTPException(400, "用户名和密码不能为空")
+    if len(data.password) < 6:
+        raise HTTPException(400, "密码至少 6 位")
+    user_id = str(uuid.uuid4())
+    password_hash = bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode()
+    conn = get_db()
+    try:
+        existing = conn.execute("SELECT user_id FROM users WHERE username=?", (username,)).fetchone()
+        if existing:
+            raise HTTPException(409, "用户名已存在")
+        conn.execute(
+            "INSERT INTO users (user_id, username, password_hash, created_at) VALUES (?,?,?,?)",
+            (user_id, username, password_hash, int(time.time())),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    token = jwt.encode(
+        {'userId': user_id, 'username': username, 'exp': int(time.time()) + 86400 * 7},
+        JWT_SECRET, algorithm='HS256',
+    )
+    return {"token": token, "userId": user_id, "username": username}
+
+
+@app.post("/api/auth/login")
+def login(data: LoginRequest):
+    """用户登录：校验密码，返回 JWT"""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE username=?", (data.username.strip(),)).fetchone()
+    finally:
+        conn.close()
+    if not row or not bcrypt.checkpw(data.password.encode(), row['password_hash'].encode()):
+        raise HTTPException(401, "用户名或密码错误")
+    token = jwt.encode(
+        {'userId': row['user_id'], 'username': row['username'], 'exp': int(time.time()) + 86400 * 7},
+        JWT_SECRET, algorithm='HS256',
+    )
+    return {"token": token, "userId": row['user_id'], "username": row['username']}
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(verify_token)):
+    """校验当前 token，返回用户信息"""
+    return {"userId": user['userId'], "username": user.get('username', '')}
+
+
+# ============ 邀请码系统（阶段2）============
+
+import secrets as _secrets
+
+
+class InvitationCreateRequest(BaseModel):
+    expires_in_hours: int = 72  # 默认 72 小时
+    max_uses: int = 0  # 0=不限
+    role: str = 'narrator'  # 被邀请者加入后的初始角色
+
+
+@app.post("/api/projects/{project_id}/invitations")
+def create_invitation(
+    project_id: str,
+    data: InvitationCreateRequest,
+    ctx: dict = Depends(require_project_role('project_id', {'owner'})),
+):
+    """生成邀请码（仅 owner 可调用）"""
+    if data.role not in {'manager', 'reviewer', 'narrator'}:
+        raise HTTPException(400, "非法角色（邀请码不可生成 owner）")
+    code = _secrets.token_urlsafe(8)  # 8 字节 = ~11 字符
+    now = int(time.time())
+    expires_at = now + data.expires_in_hours * 3600
+    conn = get_db()
+    try:
+        # 校验项目存在
+        proj = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not proj:
+            raise HTTPException(404, "项目不存在")
+        conn.execute(
+            "INSERT INTO invitations (code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role) VALUES (?,?,?,?,?,0,0,?,?)",
+            (code, project_id, ctx['user']['userId'], now, expires_at, data.role),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {
+        "code": code,
+        "projectId": project_id,
+        "expiresAt": expires_at,
+        "maxUses": data.max_uses,
+        "role": data.role,
+        "joinUrl": f"/?invite={code}",
+    }
+
+
+@app.get("/api/projects/{project_id}/invitations")
+def list_invitations(
+    project_id: str,
+    ctx: dict = Depends(require_project_role('project_id', {'owner'})),
+):
+    """列出项目所有邀请码（仅 owner 可调用）"""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role FROM invitations WHERE project_id=? ORDER BY created_at DESC",
+            (project_id,),
+        ).fetchall()
+        return {"invitations": [dict(r) for r in rows]}
+    finally:
+        conn.close()
+
+
+@app.delete("/api/projects/{project_id}/invitations/{code}")
+def revoke_invitation(
+    project_id: str,
+    code: str,
+    ctx: dict = Depends(require_project_role('project_id', {'owner'})),
+):
+    """撤销邀请码（仅 owner 可调用）"""
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "UPDATE invitations SET revoked=1 WHERE code=? AND project_id=?",
+            (code, project_id),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "邀请码不存在")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "code": code}
+
+
+@app.post("/api/invitations/{code}/join")
+def join_by_invitation(code: str, user: dict = Depends(verify_token)):
+    """通过邀请码加入项目
+
+    流程：首页输入邀请码 → 后端校验有效性 → 把当前用户加入项目成员 → 返回 projectId
+    """
+    conn = get_db()
+    try:
+        inv = conn.execute("SELECT * FROM invitations WHERE code=?", (code,)).fetchone()
+        if not inv:
+            raise HTTPException(404, "邀请码不存在")
+        if inv['revoked']:
+            raise HTTPException(410, "邀请码已撤销")
+        now = int(time.time())
+        if inv['expires_at'] and inv['expires_at'] < now:
+            raise HTTPException(410, "邀请码已过期")
+        if inv['max_uses'] > 0 and inv['use_count'] >= inv['max_uses']:
+            raise HTTPException(410, "邀请码使用次数已达上限")
+        # 已是成员则直接返回
+        existing = conn.execute(
+            "SELECT id FROM members WHERE project_id=? AND user_id=?",
+            (inv['project_id'], user['userId']),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO members (id, project_id, user_id, username, role, joined_at) VALUES (?,?,?,?,?,?)",
+                (str(uuid.uuid4()), inv['project_id'], user['userId'], user.get('username', ''), inv['role'], now),
+            )
+            conn.execute(
+                "UPDATE invitations SET use_count = use_count + 1 WHERE code=?",
+                (code,),
+            )
+            conn.commit()
+        proj = conn.execute("SELECT id, name FROM projects WHERE id=?", (inv['project_id'],)).fetchone()
+    finally:
+        conn.close()
+    return {"projectId": inv['project_id'], "projectName": proj['name'] if proj else '', "role": inv['role']}
+
+
+@app.get("/api/invitations/{code}/info")
+def invitation_info(code: str):
+    """查询邀请码信息（用于首页输入邀请码后预览项目名）"""
+    conn = get_db()
+    try:
+        inv = conn.execute("SELECT * FROM invitations WHERE code=?", (code,)).fetchone()
+        if not inv:
+            raise HTTPException(404, "邀请码不存在")
+        if inv['revoked']:
+            raise HTTPException(410, "邀请码已撤销")
+        now = int(time.time())
+        if inv['expires_at'] and inv['expires_at'] < now:
+            raise HTTPException(410, "邀请码已过期")
+        if inv['max_uses'] > 0 and inv['use_count'] >= inv['max_uses']:
+            raise HTTPException(410, "邀请码使用次数已达上限")
+        proj = conn.execute("SELECT name FROM projects WHERE id=?", (inv['project_id'],)).fetchone()
+        return {
+            "code": code,
+            "projectId": inv['project_id'],
+            "projectName": proj['name'] if proj else '',
+            "role": inv['role'],
+            "expiresAt": inv['expires_at'],
+        }
+    finally:
+        conn.close()
 
 
 # ============ 文件转换（复用 ScriptGrid）============

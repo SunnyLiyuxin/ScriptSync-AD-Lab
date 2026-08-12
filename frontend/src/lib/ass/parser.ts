@@ -148,5 +148,6 @@ function parseDialogueLine(
     _status: isComment ? 'deleted' : DEFAULT_STATUS,
     _lockedBy: null,
     _assignedTo: null,
+    _owner: null,
   };
 }

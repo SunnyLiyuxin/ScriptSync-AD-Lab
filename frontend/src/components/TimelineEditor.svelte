@@ -25,7 +25,7 @@
   import { type WaveformData } from '../lib/audio/audio-analyzer';
   import { detectSilence, markOccupiedRegions, type SilenceRegion } from '../lib/audio/silence-detector';
   import { findNextBlank, findPrevBlank } from '../lib/audio/jump-blank';
-  import { exportEvents, createEvent, updateText, updateTime, transitionStatus, importEvents, assignEvent, assignEventsBulk, softDeleteEvent, addComment, getComments } from '../lib/collaboration/yjs-operations';
+  import { exportEvents, createEvent, updateText, updateTime, transitionStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, addComment, getComments } from '../lib/collaboration/yjs-operations';
   import { lockEntry, unlockEntry, getLockHolder, getOnlineUsers, getOtherCursors } from '../lib/collaboration/awareness-lock';
   import { createShortcutManager, createDefaultShortcuts } from '../lib/shortcuts/shortcut-manager';
   import { recordEdit, getEditHistory } from '../lib/collaboration/edit-history';
@@ -285,14 +285,14 @@
 
   // 视图过滤后的字幕列表
   // - 「所有」：显示全部非 deleted 行
-  // - 「只看自己」：仅显示 _assignedTo === userId
+  // - 「只看自己」：仅显示 _owner === userId（导入者为自己，内容归属）
   // - 「按负责人」：仅显示 _assignedTo === selectedAssigneeFilter（含未分配选项）
   // - 范围过滤：若设定了 myRange（1-based 行号区间），同时按 events 全局索引过滤
   //   （范围基于 events 原始顺序，与视图无关，保证设定后切换视图仍一致）
   let filteredEvents = $derived.by<AssEvent[]>(() => {
     let list: AssEvent[];
     if (viewFilter === 'mine') {
-      list = events.filter(e => e._assignedTo === userId);
+      list = events.filter(e => e._owner === userId);
     } else if (viewFilter === 'by-assignee') {
       if (selectedAssigneeFilter === '__unassigned__') {
         list = events.filter(e => e._assignedTo === null || e._assignedTo === undefined);
@@ -494,7 +494,15 @@
   // 点击行：选中 + 视频跳转
   function selectRow(e: AssEvent) {
     selectedId = e.id;
-    onSeek(e.start);
+    // 联动降级：行点击仅选中，不触发视频跳转（保留时间戳供未来联动，见 TODO）
+  }
+
+  // 进入编辑态时自动聚焦 textarea，并将光标定位到末尾
+  function focusOnMount(node: HTMLTextAreaElement) {
+    node.focus();
+    const len = node.value.length;
+    node.setSelectionRange(len, len);
+    return {};
   }
 
   // 双击文本/Enter：进入编辑（仅自己负责的可编辑）
@@ -547,6 +555,56 @@
     const parsed = parseInlineTags(e.text);
     const newText = parsed.tags.length > 0 ? parsed.tags.join('') + editingText : editingText;
     updateText(doc, editingId, newText, userId, myRole ?? undefined);
+  }
+
+  // Excel 风格编辑：文本列键盘上下键导航
+  // ↓ 保存当前行并进入下一行文本列编辑；↑ 同理进入上一行。
+  // 多行文本时，仅在光标处于首/末行才导航，避免破坏多行编辑。
+  function onEditKeydown(ev: KeyboardEvent) {
+    ev.stopPropagation();
+    const ta = ev.currentTarget as HTMLTextAreaElement;
+    if (ev.key === 'ArrowDown') {
+      // 简化判定：单行文本 或 光标在末行
+      const lineCount = (ta.value.match(/\n/g) || []).length + 1;
+      const isLastLine = !ta.value.includes('\n') || ta.value.slice(ta.selectionStart).indexOf('\n') === -1;
+      if (lineCount === 1 || isLastLine) {
+        ev.preventDefault();
+        editAdjacentRow(1);
+      }
+    } else if (ev.key === 'ArrowUp') {
+      const lineCount = (ta.value.match(/\n/g) || []).length + 1;
+      const isFirstLine = !ta.value.includes('\n') || ta.value.slice(0, ta.selectionStart).indexOf('\n') === -1;
+      if (lineCount === 1 || isFirstLine) {
+        ev.preventDefault();
+        editAdjacentRow(-1);
+      }
+    } else if (ev.key === 'Enter' && !ev.shiftKey) {
+      // Enter 保存并下移（Excel 风格）；Shift+Enter 换行
+      ev.preventDefault();
+      editAdjacentRow(1);
+    } else if (ev.key === 'Escape') {
+      ev.preventDefault();
+      cancelEdit();
+    }
+  }
+
+  // 切换到相邻行文本列编辑（dir=1 下一行，-1 上一行）
+  function editAdjacentRow(dir: 1 | -1) {
+    if (!editingId) return;
+    saveEdit(); // 保存当前行
+    const idx = filteredEvents.findIndex(x => x.id === editingId);
+    if (idx < 0) return;
+    const nextIdx = dir > 0 ? Math.min(idx + 1, filteredEvents.length - 1) : Math.max(idx - 1, 0);
+    if (nextIdx === idx) return;
+    const next = filteredEvents[nextIdx];
+    if (next && canEdit(next) && !getLockedByOther(next.id)) {
+      startEdit(next);
+      // 滚动到新行
+      setTimeout(() => scrollRowIntoView(next.id), 0);
+    } else {
+      // 下一行不可编辑或被锁，仅选中
+      selectedId = next?.id ?? null;
+    }
   }
 
   // 非实时模式：统一保存自己负责的所有待保存改动
@@ -604,12 +662,12 @@
     });
   }
 
-  // 当前播放位置高亮
+  // 联动降级：取消「播放视频时自动高亮对应行」的实时联动。
+  // 保留 currentTime 与条目时间戳，未来只需恢复此 effect 即可启用联动。
+  // TODO(后续迭代): 恢复播放高亮 + 点击行跳转视频的联动。
+  // activeEventId 始终为 null，row.active 不再由播放位置触发。
   $effect(() => {
-    const active = events.find(e =>
-      currentTime >= e.start && currentTime <= e.end && e._status !== 'deleted',
-    );
-    activeEventId = active?.id ?? null;
+    activeEventId = null;
   });
 
   // ===== 导入 ASS（含方案 B 自动归属）=====
@@ -623,6 +681,17 @@
   let showImportConfirm = $state(false);
   let pendingImportEvents = $state<AssEvent[]>([]);
   let importMatchStats = $state<{ matched: number; unmatched: number }>({ matched: 0, unmatched: 0 });
+
+  // 导入时间范围弹窗（导入前输入视频时间段，用于偏移映射与合并插入）
+  let showTimeRangeModal = $state(false);
+  let pendingFileText = $state('');
+  let pendingFileName = $state('');
+  let timeRangeStart = $state<string>('0');
+  let timeRangeEnd = $state<string>('');
+  let timeRangeError = $state('');
+  let importTimeOffset = $state(0); // 实际偏移量（=开始秒数），确认导入时使用
+  // 冲突标红：合并导入后与已有条目时间重叠的新条目 id
+  let conflictIds = $state<Set<string>>(new Set());
 
   function resolveAssigneeByStyle(style: string, name: string, memberList: ProjectMember[]): string | null {
     // 规则 1：Style 名含 @用户名 后缀
@@ -650,26 +719,62 @@
     if (!input.files?.[0]) return;
     const file = input.files[0];
     const text = await file.text();
-    const assDoc = parseAss(text);
-    // 自动归属：基于当前已知成员列表
+    // 先弹时间范围窗，输入视频时间段后再解析
+    pendingFileText = text;
+    pendingFileName = file.name;
+    timeRangeStart = '0';
+    timeRangeEnd = '';
+    timeRangeError = '';
+    showTimeRangeModal = true;
+    input.value = '';
+  }
+
+  // 时间范围确认后：解析文件 + 设置归属（owner=当前用户）+ 自动指派
+  function proceedWithTimeRange() {
+    timeRangeError = '';
+    const startSec = parseFloat(timeRangeStart);
+    if (isNaN(startSec) || startSec < 0) {
+      timeRangeError = '开始时间需为非负数字（秒）';
+      return;
+    }
+    const endSec = timeRangeEnd.trim() === '' ? NaN : parseFloat(timeRangeEnd);
+    if (timeRangeEnd.trim() !== '' && (isNaN(endSec) || endSec <= startSec)) {
+      timeRangeError = '结束时间需大于开始时间（秒）';
+      return;
+    }
+    importTimeOffset = startSec;
+
+    const assDoc = parseAss(pendingFileText);
     const memberList = allKnownMembers;
     let matched = 0;
     const enriched = assDoc.events.map(ev => {
       const assigneeId = resolveAssigneeByStyle(ev.style, ev.name, memberList);
-      if (assigneeId) { matched++; return { ...ev, _assignedTo: assigneeId }; }
-      return { ...ev, _assignedTo: ev._assignedTo ?? null };
+      if (assigneeId) { matched++; return { ...ev, _assignedTo: assigneeId, _owner: userId }; }
+      return { ...ev, _assignedTo: ev._assignedTo ?? null, _owner: userId };
     });
     pendingImportEvents = enriched;
     importMatchStats = { matched, unmatched: enriched.length - matched };
+    showTimeRangeModal = false;
     showImportConfirm = true;
-    input.value = '';
+  }
+
+  function cancelTimeRange() {
+    showTimeRangeModal = false;
+    pendingFileText = '';
+    pendingFileName = '';
   }
 
   // 确认导入（用户在弹窗里可能已修改归属）
   function confirmImport() {
-    importEvents(doc, pendingImportEvents);
+    // 合并导入：按 importTimeOffset 偏移映射 + 合并排序插入 + 冲突检测
+    const conflicts = importEventsMerge(doc, pendingImportEvents, importTimeOffset);
+    conflictIds = new Set(conflicts);
     showImportConfirm = false;
     pendingImportEvents = [];
+    if (conflicts.length > 0) {
+      // 短暂提示冲突，标红会持续到用户处理
+      setTimeout(() => { conflictIds = new Set(); }, 8000);
+    }
   }
 
   function cancelImport() {
@@ -1214,6 +1319,7 @@
               class:range-boundary={rangeBoundaryIds.has(e.id)}
               class:readonly={!canEdit(e)}
               class:being-edited={!!cursorUser}
+              class:conflict={conflictIds.has(e.id)}
               style="--status-color: {STATUS_COLORS[e._status]}; --cursor-color: {cursorUser?.color ?? 'transparent'}"
               on:click={() => selectRow(e)}
               on:dblclick={() => startEdit(e)}
@@ -1242,8 +1348,8 @@
                   {/if}
                 </div>
               </td>
-              <td class="col-start time-cell" on:click|stopPropagation={() => onSeek(e.start)}>{formatDisplayTime(e.start)}</td>
-              <td class="col-end time-cell" on:click|stopPropagation={() => onSeek(e.end)}>{formatDisplayTime(e.end)}</td>
+              <td class="col-start time-cell" title="开始时间（联动跳转已降级，未来迭代恢复）">{formatDisplayTime(e.start)}</td>
+              <td class="col-end time-cell" title="结束时间（联动跳转已降级，未来迭代恢复）">{formatDisplayTime(e.end)}</td>
               <td class="col-type">
                 <span class="layer-badge layer-{e.layer}">{e.layer === 0 ? '对白' : '口述'}</span>
               </td>
@@ -1253,18 +1359,25 @@
                   <textarea
                     bind:value={editingText}
                     on:input={onTextInput}
-                    on:keydown={(ev) => ev.stopPropagation()}
+                    on:keydown={onEditKeydown}
                     rows="2"
                     placeholder="输入口述文本..."
+                    use:focusOnMount
                   ></textarea>
                 {:else}
                   {@const parsed = parseInlineTags(e.text)}
                   {@const lastEditor = lastEditorOf(e.id)}
-                  <div class="text-cell" class:empty={!parsed.cleanText}>
+                  <div
+                    class="text-cell"
+                    class:empty={!parsed.cleanText}
+                    class:editable={canEdit(e) && !getLockedByOther(e.id)}
+                    on:click|stopPropagation={() => canEdit(e) && !getLockedByOther(e.id) && startEdit(e)}
+                    title={canEdit(e) && !getLockedByOther(e.id) ? '单击编辑' : '他人负责，只读'}
+                  >
                     {#if parsed.tags.length > 0}
                       <span class="tags-readonly">{parsed.tags.join('')}</span>
                     {/if}
-                    <span class="text-body">{parsed.cleanText || (canEdit(e) ? '(空，双击编辑)' : '(空)')}</span>
+                    <span class="text-body">{parsed.cleanText || (canEdit(e) ? '(空，单击编辑)' : '(空)')}</span>
                   </div>
                   {#if !canEdit(e)}
                     <span class="lock-icon" title="他人负责，只读">🔒</span>
@@ -1365,14 +1478,46 @@
       </div>
     {/if}
 
+    <!-- 导入时间范围弹窗（导入前输入视频时间段，用于偏移映射）-->
+    {#if showTimeRangeModal}
+      <div class="modal-overlay" on:click|self={cancelTimeRange}>
+        <div class="modal-box" role="dialog" aria-modal="true">
+          <div class="modal-title">导入时间范围 — {pendingFileName}</div>
+          <div class="modal-desc">
+            请输入该文件对应视频的时间段（单位：秒，支持小数）。
+            解析出的字幕条目时间将加上「开始时间」偏移量，按全局时间升序合并插入到现有表格。
+            <br /><span class="hint">示例：已有前段 0-300s，你负责中间段，输入开始 300、结束 600，条目将插入到 300-600s 区间。</span>
+          </div>
+          <div class="modal-form">
+            <label class="form-row">
+              <span>开始时间（秒）</span>
+              <input type="number" step="0.1" min="0" bind:value={timeRangeStart} placeholder="如 300" />
+            </label>
+            <label class="form-row">
+              <span>结束时间（秒，选填）</span>
+              <input type="number" step="0.1" min="0" bind:value={timeRangeEnd} placeholder="如 600" />
+            </label>
+            {#if timeRangeError}
+              <div class="error-msg">{timeRangeError}</div>
+            {/if}
+          </div>
+          <div class="modal-actions">
+            <button class="btn btn-cancel" on:click={cancelTimeRange}>取消</button>
+            <button class="btn btn-primary" on:click={proceedWithTimeRange}>下一步：解析并预览</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     <!-- 导入 ASS 确认弹窗（含自动归属复核）-->
     {#if showImportConfirm}
       <div class="modal-overlay modal-wide" on:click|self={cancelImport}>
         <div class="modal-box" role="dialog" aria-modal="true">
           <div class="modal-title">导入确认 — 自动归属匹配</div>
           <div class="modal-desc">
-            已解析 {pendingImportEvents.length} 条字幕。自动匹配到负责人 {importMatchStats.matched} 条，
-            未匹配 {importMatchStats.unmatched} 条。可逐行修改负责人后确认导入。
+            已解析 {pendingImportEvents.length} 条字幕，时间偏移 +{importTimeOffset}s。
+            自动匹配到负责人 {importMatchStats.matched} 条，未匹配 {importMatchStats.unmatched} 条。
+            可逐行修改负责人后确认导入（将合并插入到现有表格）。
             <br /><span class="hint">匹配规则：Style 名含 @用户名 后缀 → Style 名等于用户名 → Name 字段等于用户名</span>
           </div>
           <div class="import-table-wrap">
@@ -1386,7 +1531,7 @@
                 {#each pendingImportEvents as ev, i (ev.id)}
                   <tr>
                     <td>{i + 1}</td>
-                    <td>{formatDisplayTime(ev.start)}</td>
+                    <td>{formatDisplayTime(ev.start + importTimeOffset)}</td>
                     <td class="cell-style">{ev.style}</td>
                     <td class="cell-name">{ev.name || '—'}</td>
                     <td class="cell-text">{stripAllTags(ev.text).slice(0, 40) || '(空)'}</td>
@@ -1724,6 +1869,9 @@
   .row.range-boundary { box-shadow: inset 3px 0 0 #d29922; background: #fffbea; }
   .row.range-boundary:hover { background: #fff5d0; }
   .row.active { box-shadow: inset 3px 0 0 #0969da; }
+  /* 导入时间冲突：与已有条目时间重叠的行标红 */
+  .row.conflict { background: #ffe5e5 !important; box-shadow: inset 3px 0 0 #cf222e; }
+  .row.conflict:hover { background: #ffd6d6 !important; }
   .row.readonly .text-cell { color: #57606a; }
   /* 阶段5-2：他人正在编辑此行 —— 左侧光标色边条 + 浅底 */
   .row.being-edited {
@@ -1761,6 +1909,9 @@
   .layer-1 { background: #ddf4ff; color: #0969da; }
   .text-cell { line-height: 1.5; word-break: break-word; }
   .text-cell.empty .text-body { color: #8c959f; font-style: italic; }
+  /* Excel 风格：可编辑文本列单击进入编辑，悬停提示可点 */
+  .text-cell.editable { cursor: text; border-radius: 3px; }
+  .text-cell.editable:hover { background: #f0f7ff; outline: 1px solid #0969da; }
   .tags-readonly { color: #8c959f; font-family: 'SF Mono', Monaco, monospace; font-size: 11px; }
   .lock-icon { font-size: 11px; margin-left: 4px; }
   /* 阶段5-3：修改追踪 —— 行内「已修改」头像按钮 */
@@ -1858,6 +2009,11 @@
   }
   .range-sep { color: #8c959f; padding-top: 20px; }
   .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  /* 时间范围弹窗表单 */
+  .modal-form .form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; font-size: 12px; color: #57606a; }
+  .modal-form .form-row span { font-weight: 600; }
+  .modal-form .form-row input { padding: 8px 10px; border: 1px solid #d0d7de; border-radius: 4px; font-size: 14px; }
+  .error-msg { color: #cf222e; font-size: 12px; margin-bottom: 8px; }
   /* 导入确认表格 */
   .import-table-wrap {
     max-height: 50vh; overflow: auto; margin-bottom: 16px;

@@ -36,6 +36,7 @@ export function createEvent(
   yMap.set('_status', data._status || 'empty');
   yMap.set('_lockedBy', null);
   yMap.set('_assignedTo', data._assignedTo ?? null);
+  yMap.set('_owner', data._owner ?? null);
 
   // 按时间插入到正确位置（保持有序，便于渲染与重叠检测）
   let idx = events.length;
@@ -369,6 +370,8 @@ export function addReply(
 
 /**
  * 导入 AssEvent 数组到 Yjs 文档（批量初始化，如解析 ASS 文件后）
+ * 注意：此函数会清空现有 events，仅用于首次导入。
+ * 多人分段导入请使用 importEventsMerge。
  */
 export function importEvents(doc: Y.Doc, events: AssEvent[]): void {
   const yEvents = doc.getArray<YEvent>('events');
@@ -389,10 +392,81 @@ export function importEvents(doc: Y.Doc, events: AssEvent[]): void {
       m.set('_status', e._status);
       m.set('_lockedBy', null);
       m.set('_assignedTo', e._assignedTo ?? null);
+      m.set('_owner', e._owner ?? null);
       return m;
     });
     yEvents.push(yMaps);
   });
+}
+
+/**
+ * 合并导入：将新条目按时间偏移映射后，合并插入到现有 events（不清空）。
+ * - 时间偏移：parsed 条目的 start/end 加上 timeOffset（用户输入的开始秒数）
+ * - 合并排序：按 start 升序插入到正确位置，保证整个表格时间连续
+ * - 冲突检测：与同 layer 已有条目时间重叠的条目 id 返回，由前端标红
+ * @returns 与已有条目时间重叠的新导入条目 id 列表（用于冲突标红）
+ */
+export function importEventsMerge(
+  doc: Y.Doc,
+  newEvents: AssEvent[],
+  timeOffset: number = 0,
+): string[] {
+  const yEvents = doc.getArray<YEvent>('events');
+  const conflictIds: string[] = [];
+
+  doc.transact(() => {
+    // 偏移映射 + 排序
+    const offsetted = newEvents
+      .map(e => ({
+        ...e,
+        start: e.start + timeOffset,
+        end: e.end + timeOffset,
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    // 逐条按时间有序插入
+    for (const e of offsetted) {
+      // 冲突检测：与同 layer 非删除条目时间重叠
+      let hasConflict = false;
+      for (let i = 0; i < yEvents.length; i++) {
+        const existing = yEvents.get(i);
+        if ((existing.get('_status') as EventStatus) === 'deleted') continue;
+        if ((existing.get('layer') as number) !== e.layer) continue;
+        const eStart = existing.get('start') as number;
+        const eEnd = existing.get('end') as number;
+        if (e.start < eEnd && e.end > eStart) {
+          hasConflict = true;
+          break;
+        }
+      }
+      if (hasConflict) conflictIds.push(e.id);
+
+      const m = new Y.Map();
+      m.set('id', e.id);
+      m.set('layer', e.layer);
+      m.set('start', e.start);
+      m.set('end', e.end);
+      m.set('style', e.style);
+      m.set('name', e.name);
+      m.set('text', e.text);
+      m.set('_status', e._status);
+      m.set('_lockedBy', null);
+      m.set('_assignedTo', e._assignedTo ?? null);
+      m.set('_owner', e._owner ?? null);
+
+      // 找到第一个 start 大于当前条目 start 的位置插入
+      let idx = yEvents.length;
+      for (let i = 0; i < yEvents.length; i++) {
+        if ((yEvents.get(i).get('start') as number) > e.start) {
+          idx = i;
+          break;
+        }
+      }
+      yEvents.insert(idx, [m]);
+    }
+  });
+
+  return conflictIds;
 }
 
 /**
@@ -415,6 +489,7 @@ export function exportEvents(doc: Y.Doc): AssEvent[] {
       _status: e.get('_status') as EventStatus,
       _lockedBy: (e.get('_lockedBy') as string | null) ?? null,
       _assignedTo: (e.get('_assignedTo') as string | null) ?? null,
+      _owner: (e.get('_owner') as string | null) ?? null,
     });
   }
   return result.sort((a, b) => a.start - b.start);

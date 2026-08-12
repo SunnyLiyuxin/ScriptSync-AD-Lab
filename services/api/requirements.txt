@@ -5,6 +5,7 @@ uvicorn[standard]==0.52.1
 openpyxl==3.1.5
 python-multipart==0.0.32
 pyjwt==2.9.0
+bcrypt==4.2.0
 # AI 调用（V1.5 客观中性改写，精度优先选模型）
 dashscope==1.20.0
 # SUP PGS 字幕（V2 扩展，MVP 暂不需要）
