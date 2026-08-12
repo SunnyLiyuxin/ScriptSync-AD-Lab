@@ -1,0 +1,18 @@
+{
+  "name": "scriptsync-collab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "issue-token": "node src/issue-token.js"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.0",
+    "ws": "^8.16.0",
+    "y-protocols": "^1.0.6",
+    "y-websocket": "^2.0.0",
+    "yjs": "^13.6.0"
+  }
+}

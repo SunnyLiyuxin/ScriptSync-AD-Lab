@@ -1,0 +1,16 @@
+# ScriptSync API 依赖
+# 复用 ScriptGrid 验证过的技术栈
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+openpyxl==3.1.5
+python-multipart==0.0.32
+pyjwt==2.9.0
+# AI 调用（V1.5 客观中性改写，精度优先选模型）
+dashscope==1.20.0
+# SUP PGS 字幕（V2 扩展，MVP 暂不需要）
+# torchfree_ocr==1.1.0
+# SUP/PGS 解析与 OCR 相关（均为可选，未安装时自动降级）：
+#   pgsreader —— SUP 解析（PyPI 无该包时使用内置 PGS 解析器）
+#   Pillow    —— 位图重建为 PNG 供 OCR（未安装则跳过 OCR，仅返回时间码）
+# pgsreader
+# Pillow

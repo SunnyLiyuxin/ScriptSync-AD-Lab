@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+__pycache__/
+*.pyc
+.svelte-kit/
+dist/
+build/
+
+# 环境与密钥
+.env
+.env.local
+*.secret
+
+# 数据库与上传（本地开发）
+*.db
+/tmp/scriptsync-uploads/
+uploads/
+*.waveform.json
+snapshots/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db

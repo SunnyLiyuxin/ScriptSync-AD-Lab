@@ -1,0 +1,49 @@
+# ScriptSync 本地开发环境
+# 串联三端：frontend (Svelte) + collab (Node.js y-websocket) + api (Python FastAPI)
+version: '3.8'
+
+services:
+  # 前端 Svelte 5
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_COLLAB_WS_URL=ws://localhost:1234
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - api
+      - collab
+
+  # 协作服务端 Node.js y-websocket
+  collab:
+    build: ./services/collab
+    ports:
+      - "1234:1234"
+    environment:
+      - PORT=1234
+      - JWT_SECRET=${JWT_SECRET:-scriptsync-dev-secret-change-in-prod}
+
+  # Python FastAPI 业务层
+  api:
+    build: ./services/api
+    ports:
+      - "8000:8000"
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-scriptsync-dev-secret-change-in-prod}
+      - COLLAB_WS_URL=ws://collab:1234
+      - DB_PATH=/data/scriptsync.db
+      - UPLOAD_DIR=/data/uploads
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - AI_MODEL=${AI_MODEL:-qwen-max}
+    volumes:
+      - api-data:/data
+      - ./services/api:/app
+    depends_on:
+      - collab
+
+volumes:
+  api-data:
