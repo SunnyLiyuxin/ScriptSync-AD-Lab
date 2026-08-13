@@ -80,13 +80,34 @@
     videoEl.muted = muted;
   }
 
-  // 进度条交互
-  function onProgressClick(e: MouseEvent) {
+  // 进度条交互：点击跳转 + 拖拽跳转
+  let isDragging = $state(false);
+
+  function seekFromEvent(e: MouseEvent, bar: HTMLElement) {
     if (!videoEl || !duration) return;
-    const bar = e.currentTarget as HTMLElement;
     const rect = bar.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     seek(ratio * duration);
+  }
+
+  function onProgressClick(e: MouseEvent) {
+    if (!videoEl || !duration) return;
+    seekFromEvent(e, e.currentTarget as HTMLElement);
+  }
+
+  function onProgressMouseDown(e: MouseEvent) {
+    if (!videoEl || !duration) return;
+    isDragging = true;
+    seekFromEvent(e, e.currentTarget as HTMLElement);
+  }
+
+  function onProgressMouseMove(e: MouseEvent) {
+    if (!isDragging || !videoEl || !duration) return;
+    seekFromEvent(e, e.currentTarget as HTMLElement);
+  }
+
+  function onProgressMouseUp() {
+    isDragging = false;
   }
 
   // 鼠标移入显示控制条，移出后 1.5s 隐藏
@@ -101,10 +122,10 @@
   }
 
   function fmt(t: number): string {
-    if (!Number.isFinite(t) || t < 0) return '0:00';
+    if (!Number.isFinite(t) || t < 0) return '00:00';
     const m = Math.floor(t / 60);
     const s = Math.floor(t % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
 
   // 快捷键
@@ -185,7 +206,16 @@
 
       <span class="time">{fmt(currentTime)}</span>
 
-      <div class="progress-bar" on:click={onProgressClick} title="点击跳转">
+      <div
+        class="progress-bar"
+        class:dragging={isDragging}
+        on:click={onProgressClick}
+        on:mousedown={onProgressMouseDown}
+        on:mousemove={onProgressMouseMove}
+        on:mouseup={onProgressMouseUp}
+        on:mouseleave={onProgressMouseUp}
+        title="点击或拖拽跳转"
+      >
         <div class="progress-buffered" style="width: 0%"></div>
         <div class="progress-played" style="width: {duration ? (currentTime / duration) * 100 : 0}%"></div>
       </div>
@@ -299,8 +329,9 @@
     cursor: pointer;
     position: relative;
     min-width: 60px;
+    user-select: none;
   }
-  .progress-bar:hover { height: 7px; }
+  .progress-bar:hover, .progress-bar.dragging { height: 7px; }
   .progress-played {
     height: 100%;
     background: #0969da;

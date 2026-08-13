@@ -11,7 +11,7 @@
    * 5. 点击行 → 视频跳转到该条开始时间
    * 6. 视频上传入口（流式，支持大文件）
    */
-  import { createEventDispatcher, onMount, onDestroy } from 'svelte';
+  import { createEventDispatcher, onMount, onDestroy, tick } from 'svelte';
   import * as Y from 'yjs';
   import type { WebsocketProvider } from 'y-websocket';
   import VideoPlayer from './VideoPlayer.svelte';
@@ -694,6 +694,11 @@
     selectedId = newId;
     contextMenu = null;
     scrollRowIntoView(newId);
+    // 插入后自动聚焦文本列进入编辑状态
+    tick().then(() => {
+      const newEvent = events.find(x => x.id === newId);
+      if (newEvent) startEdit(newEvent);
+    });
   }
 
   // 在指定行下方插入空行（继承 layer/style，时间沿用该行终点）
@@ -714,6 +719,11 @@
     selectedId = newId;
     contextMenu = null;
     scrollRowIntoView(newId);
+    // 插入后自动聚焦文本列进入编辑状态
+    tick().then(() => {
+      const newEvent = events.find(x => x.id === newId);
+      if (newEvent) startEdit(newEvent);
+    });
   }
 
   // 批量硬删除已勾选条目（彻底从 Yjs 数组移除，用于清理导入的 ASS 字幕）
