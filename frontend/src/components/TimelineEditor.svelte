@@ -25,7 +25,7 @@
   import { type WaveformData } from '../lib/audio/audio-analyzer';
   import { detectSilence, markOccupiedRegions, type SilenceRegion } from '../lib/audio/silence-detector';
   import { findNextBlank, findPrevBlank } from '../lib/audio/jump-blank';
-  import { exportEvents, createEvent, insertEventAt, findEventIndex, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, deleteEventsBulk, addComment, getComments } from '../lib/collaboration/yjs-operations';
+  import { exportEvents, createEvent, insertEventAt, findEventIndex, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, deleteEventsBulk, addComment, getComments, addReply, resolveComment } from '../lib/collaboration/yjs-operations';
   import { lockEntry, unlockEntry, getLockHolder, getOnlineUsers, getOtherCursors } from '../lib/collaboration/awareness-lock';
   import { createShortcutManager, createDefaultShortcuts } from '../lib/shortcuts/shortcut-manager';
   import { recordEdit, getEditHistory } from '../lib/collaboration/edit-history';
@@ -101,9 +101,17 @@
   // 行勾选集合（基于 e.id）
   let checkedIds = $state<Set<string>>(new Set());
 
-  // 内联批注：当前展开输入框的 eventId
+  // 内联批注（旧）：当前展开输入框的 eventId
   let inlineReviewEventId = $state<string | null>(null);
   let inlineReviewText = $state('');
+
+  // ===== 批注模式（Word 风格便签条）=====
+  let annotationMode = $state(false);            // 批注模式开关
+  let annotationEventId = $state<string | null>(null);  // 当前展开便签条的 eventId
+  let annotationText = $state('');               // 新批注输入
+  let annotationPos = $state<{ x: number; y: number; rowRight: number; rowTop: number; rowBottom: number } | null>(null);
+  let replyToCommentId = $state<string | null>(null);  // 当前回复的批注 id
+  let replyText = $state('');
 
   // 右键上下文菜单：定位到某行，可「插入上一行/下一行」
   let contextMenu = $state<{ eventId: string; x: number; y: number } | null>(null);
@@ -502,25 +510,104 @@
     });
   }
 
-  // ===== 内联批注 =====
-  function openInlineReview(eventId: string) {
-    inlineReviewEventId = eventId;
-    inlineReviewText = '';
+  // ===== 批注模式（Word 风格便签条）=====
+  // 切换批注模式
+  function toggleAnnotationMode() {
+    annotationMode = !annotationMode;
+    if (!annotationMode) {
+      // 退出批注模式时关闭便签条
+      closeAnnotation();
+    }
   }
-  function closeInlineReview() {
-    inlineReviewEventId = null;
-    inlineReviewText = '';
+
+  // 打开便签条：定位到字幕行右侧
+  function openAnnotation(eventId: string) {
+    annotationEventId = eventId;
+    annotationText = '';
+    replyToCommentId = null;
+    replyText = '';
+    // 等待 DOM 更新后计算位置
+    setTimeout(() => {
+      const rowEl = tableBodyEl?.querySelector(`[data-row-id="${eventId}"]`) as HTMLElement | null;
+      if (rowEl) {
+        const rect = rowEl.getBoundingClientRect();
+        const panelWidth = 320;
+        // 若右侧空间不足，放到左侧
+        const placeLeft = rect.right + panelWidth + 24 > window.innerWidth;
+        const x = placeLeft ? rect.left - panelWidth - 16 : rect.right + 16;
+        annotationPos = {
+          x,
+          y: rect.top,
+          rowRight: placeLeft ? rect.left : rect.right,
+          rowTop: rect.top,
+          rowBottom: rect.bottom,
+        };
+      }
+    }, 0);
   }
-  function submitInlineReview(eventId: string) {
-    const text = inlineReviewText.trim();
+
+  function closeAnnotation() {
+    annotationEventId = null;
+    annotationPos = null;
+    annotationText = '';
+    replyToCommentId = null;
+    replyText = '';
+  }
+
+  // 提交新批注
+  function submitAnnotation(eventId: string) {
+    const text = annotationText.trim();
     if (!text) return;
     addComment(doc, eventId, {
       authorId: userId,
       authorName: username,
       content: text,
     });
-    inlineReviewText = '';
-    inlineReviewEventId = null;
+    annotationText = '';
+  }
+
+  // 提交对某条批注的回复
+  function submitReply(eventId: string, commentId: string) {
+    const text = replyText.trim();
+    if (!text) return;
+    addReply(doc, eventId, commentId, {
+      authorId: userId,
+      authorName: username,
+      content: text,
+    });
+    replyText = '';
+    replyToCommentId = null;
+  }
+
+  // 解决批注
+  function resolveAnnotation(eventId: string, commentId: string) {
+    resolveComment(doc, eventId, commentId);
+  }
+
+  // 便签条外部点击关闭
+  function onAnnotationOverlayClick(ev: MouseEvent) {
+    // 点击遮罩自身（非便签条内部）时关闭
+    if (ev.target === ev.currentTarget) {
+      closeAnnotation();
+    }
+  }
+
+  // ===== 内联批注（旧，保留兼容）=====
+  function openInlineReview(eventId: string) {
+    openAnnotation(eventId);
+  }
+  function closeInlineReview() {
+    closeAnnotation();
+  }
+  function submitInlineReview(eventId: string) {
+    const text = annotationText.trim();
+    if (!text) return;
+    addComment(doc, eventId, {
+      authorId: userId,
+      authorName: username,
+      content: text,
+    });
+    annotationText = '';
   }
   // 取某行的未解决批注（用于行前头像标记）
   function reviewAuthorsOf(eventId: string): ReviewComment[] {
@@ -569,6 +656,10 @@
   // 点击行：选中 + 视频跳转
   function selectRow(e: AssEvent) {
     selectedId = e.id;
+    // 批注模式下：点击行直接打开便签条（不进入文本编辑）
+    if (annotationMode) {
+      openAnnotation(e.id);
+    }
     // 联动降级：行点击仅选中，不触发视频跳转（保留时间戳供未来联动，见 TODO）
   }
 
@@ -649,6 +740,7 @@
 
   // 双击文本/Enter：进入编辑（仅自己负责的可编辑）
   function startEdit(e: AssEvent) {
+    if (annotationMode) return; // 批注模式下禁用文本编辑
     if (!canEdit(e)) return; // 权限校验
     const locked = getLockedByOther(e.id);
     if (locked) return;
@@ -1383,15 +1475,15 @@
           </button>
           <button class="btn btn-tool" on:click={clearAssign} title="解除勾选行的指派" disabled={checkedIds.size === 0}>解除</button>
         {/if}
-        {#if can('manage_members')}
-          <button class="btn btn-tool" on:click={() => { showMembersModal = true; refreshMembers(); }} title="成员管理">成员</button>
+        {#if myRole}
+          <button class="btn btn-tool" on:click={() => { showMembersModal = true; refreshMembers(); }} title="查看成员">成员</button>
         {/if}
         <label class="btn btn-video" class:disabled={uploadingVideo}>
           {uploadingVideo ? '上传中...' : '上传视频'}
           <input type="file" accept="video/*" on:change={onUploadVideo} hidden disabled={uploadingVideo} bind:this={videoInput} />
         </label>
         <button class="btn btn-tool" class:active={activePanel === 'ai'} on:click={() => togglePanel('ai')} title="AI检测（基于勾选行或范围）">AI</button>
-        <button class="btn btn-tool" on:click={() => { if (selectedId) openInlineReview(selectedId); }} title="批注（勾选/选中行后内联展开）" disabled={!selectedId}>批注</button>
+        <button class="btn btn-tool" class:active={annotationMode} on:click={toggleAnnotationMode} title="批注模式：开启后点击字幕行打开便签条">{annotationMode ? '退出批注' : '批注'}</button>
         {#if can('version_manage')}
           <button class="btn btn-tool" class:active={activePanel === 'version'} on:click={() => togglePanel('version')} title="版本历史">版本</button>
         {/if}
@@ -1533,6 +1625,14 @@
               </td>
               <td class="col-idx">
                 <div class="idx-cell">
+                  <!-- 左上角批注红点：有未解决批注时显示，悬停发光，点击展开便签条 -->
+                  {#if reviews.length > 0}
+                    <button
+                      class="annotation-dot"
+                      title="{reviews.length} 条批注，点击查看"
+                      on:click|stopPropagation={() => openAnnotation(e.id)}
+                    >●</button>
+                  {/if}
                   <span>{i + 1}</span>
                   {#if cursorUser}
                     <div class="cursor-avatar" title="{cursorUser.username} 正在编辑" style="background: {cursorUser.color}">
@@ -1572,9 +1672,9 @@
                   <div
                     class="text-cell"
                     class:empty={!parsed.cleanText}
-                    class:editable={canEdit(e) && !getLockedByOther(e.id)}
-                    on:click|stopPropagation={() => canEdit(e) && !getLockedByOther(e.id) && startEdit(e)}
-                    title={canEdit(e) && !getLockedByOther(e.id) ? '单击编辑' : '他人负责，只读'}
+                    class:editable={canEdit(e) && !getLockedByOther(e.id) && !annotationMode}
+                    on:click|stopPropagation={() => annotationMode ? openAnnotation(e.id) : (canEdit(e) && !getLockedByOther(e.id) && startEdit(e))}
+                    title={annotationMode ? '点击添加批注' : (canEdit(e) && !getLockedByOther(e.id) ? '单击编辑' : '他人负责，只读')}
                   >
                     {#if parsed.tags.length > 0}
                       <span class="tags-readonly">{parsed.tags.join('')}</span>
@@ -1610,40 +1710,6 @@
                 {/if}
               </td>
             </tr>
-            {#if inlineReviewEventId === e.id}
-              <tr class="inline-review-row">
-                <td colspan="8">
-                  <div class="inline-review-box">
-                    <div class="avatar avatar-sm" style="background: {avatarColor(userId)}">{initialOf(username)}</div>
-                    <textarea
-                      bind:value={inlineReviewText}
-                      placeholder="对此行添加批注... (Ctrl+Enter 提交)"
-                      rows="2"
-                      on:keydown={(ev) => {
-                        ev.stopPropagation();
-                        if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); submitInlineReview(e.id); }
-                        if (ev.key === 'Escape') { ev.preventDefault(); closeInlineReview(); }
-                      }}
-                    ></textarea>
-                    <button class="btn btn-primary" on:click={() => submitInlineReview(e.id)} disabled={!inlineReviewText.trim()}>提交</button>
-                    <button class="btn btn-cancel" on:click={closeInlineReview}>取消</button>
-                  </div>
-                  {#if reviews.length > 0}
-                    <div class="inline-review-list">
-                      {#each reviews as c (c.id)}
-                        <div class="inline-comment">
-                          <div class="avatar avatar-tiny" style="background: {avatarColor(c.authorId)}">{initialOf(c.authorName)}</div>
-                          <div class="comment-body">
-                            <span class="comment-author">{c.authorName}</span>
-                            <span class="comment-content">{c.content}</span>
-                          </div>
-                        </div>
-                      {/each}
-                    </div>
-                  {/if}
-                </td>
-              </tr>
-            {/if}
           {:else}
             <tr><td colspan="8" class="empty-row">
               {#if events.length === 0}
@@ -1656,6 +1722,116 @@
         </tbody>
       </table>
     </div>
+
+    <!-- 批注便签条：Word 风格浮层 + SVG 牵引线 -->
+    {#if annotationEventId && annotationPos}
+      {@const annComments = getComments(doc, annotationEventId)}
+      <!-- 透明遮罩：点击外部关闭便签条 -->
+      <div class="annotation-overlay" on:click={onAnnotationOverlayClick} on:contextmenu|preventDefault|stopPropagation>
+        <!-- SVG 牵引线：从字幕行右侧到便签条左侧 -->
+        <svg class="annotation-line-svg">
+          <line
+            x1={annotationPos.rowRight}
+            y1={(annotationPos.rowTop + annotationPos.rowBottom) / 2}
+            x2={annotationPos.x}
+            y2={annotationPos.y + 40}
+            stroke="#d29922"
+            stroke-width="2"
+            stroke-dasharray="4,3"
+          />
+          <circle
+            cx={annotationPos.rowRight}
+            cy={(annotationPos.rowTop + annotationPos.rowBottom) / 2}
+            r="4"
+            fill="#d29922"
+          />
+        </svg>
+
+        <!-- 便签条主体 -->
+        <div
+          class="annotation-sticky"
+          style="left: {annotationPos.x}px; top: {annotationPos.y}px"
+          on:click|stopPropagation
+          on:contextmenu|stopPropagation
+        >
+          <div class="sticky-header">
+            <span class="sticky-title">📌 批注 ({annComments.length})</span>
+            <button class="sticky-close" on:click={closeAnnotation} title="收起便签条">×</button>
+          </div>
+
+          <!-- 已有批注列表（含回复） -->
+          <div class="sticky-list">
+            {#if annComments.length === 0}
+              <div class="sticky-empty">暂无批注，在下方添加第一条</div>
+            {:else}
+              {#each annComments as c (c.id)}
+                <div class="sticky-comment" class:resolved={c.resolved}>
+                  <div class="comment-head">
+                    <div class="avatar avatar-tiny" style="background: {avatarColor(c.authorId)}">{initialOf(c.authorName)}</div>
+                    <span class="comment-author">{c.authorName}</span>
+                    <span class="comment-time">{new Date(c.createdAt).toLocaleString()}</span>
+                    {#if c.resolved}<span class="resolved-tag">已解决</span>{/if}
+                  </div>
+                  <div class="comment-content">{c.content}</div>
+                  <!-- 嵌套回复 -->
+                  {#if c.replies && c.replies.length > 0}
+                    <div class="reply-list">
+                      {#each c.replies as r (r.id)}
+                        <div class="reply-item">
+                          <div class="avatar avatar-tiny" style="background: {avatarColor(r.authorId)}">{initialOf(r.authorName)}</div>
+                          <div class="reply-body">
+                            <span class="reply-author">{r.authorName}</span>
+                            <span class="reply-content">{r.content}</span>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                  <!-- 回复输入 -->
+                  {#if replyToCommentId === c.id}
+                    <div class="reply-input-box">
+                      <input
+                        type="text"
+                        bind:value={replyText}
+                        placeholder="回复 {c.authorName}... (Enter 提交)"
+                        on:keydown={(ev) => {
+                          if (ev.key === 'Enter') { ev.preventDefault(); submitReply(annotationEventId!, c.id); }
+                          if (ev.key === 'Escape') { ev.preventDefault(); replyToCommentId = null; replyText = ''; }
+                        }}
+                      />
+                      <button class="btn btn-small" on:click={() => submitReply(annotationEventId!, c.id)} disabled={!replyText.trim()}>回复</button>
+                      <button class="btn btn-small btn-cancel" on:click={() => { replyToCommentId = null; replyText = ''; }}>取消</button>
+                    </div>
+                  {:else}
+                    <div class="comment-actions">
+                      <button class="btn-text" on:click={() => { replyToCommentId = c.id; replyText = ''; }}>回复</button>
+                      {#if !c.resolved}
+                        <button class="btn-text" on:click={() => resolveAnnotation(annotationEventId!, c.id)}>标记解决</button>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            {/if}
+          </div>
+
+          <!-- 新批注输入 -->
+          <div class="sticky-input">
+            <div class="avatar avatar-tiny" style="background: {avatarColor(userId)}">{initialOf(username)}</div>
+            <textarea
+              bind:value={annotationText}
+              placeholder="添加批注... (Ctrl+Enter 提交)"
+              rows="2"
+              on:keydown={(ev) => {
+                if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); submitAnnotation(annotationEventId!); }
+                if (ev.key === 'Escape') { ev.preventDefault(); closeAnnotation(); }
+              }}
+            ></textarea>
+            <button class="btn btn-primary btn-small" on:click={() => submitAnnotation(annotationEventId!)} disabled={!annotationText.trim()}>提交</button>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     <!-- 右键上下文菜单：插入上一行/下一行 -->
     {#if contextMenu}
@@ -1821,79 +1997,97 @@
     {/if}
 
     <!-- 成员管理弹窗（仅 owner 可见）-->
-    {#if showMembersModal && can('manage_members')}
+    {#if showMembersModal}
       <div class="modal-overlay modal-wide" on:click|self={() => showMembersModal = false}>
         <div class="modal-box" role="dialog" aria-modal="true">
-          <div class="modal-title">成员管理</div>
-          <div class="modal-desc">添加成员、修改角色、移除成员。owner 不可被移除/降级。</div>
+          <div class="modal-title">项目成员</div>
+          <div class="modal-desc">共 {allKnownMembers.length} 人 · 在线 {onlineUsers.length} 人（头像发光）</div>
 
-          <div class="members-add-row">
-            {#if candidateMembers.length > 0}
-              <select bind:value={pickedCandidateUserId} title="从在线用户中选择">
-                <option value="">— 在线用户 —</option>
-                {#each candidateMembers as m (m.userId)}
-                  <option value={m.userId}>{m.username}</option>
-                {/each}
-              </select>
-            {/if}
-            <input type="text" bind:value={newMemberUsername} placeholder="或输入用户名（无在线用户时）" />
-            <select bind:value={newMemberRole}>
-              {#each Object.entries(ROLE_LABELS) as [value, label]}
-                {#if value !== 'owner'}
-                  <option value={value}>{label}</option>
+          <!-- 成员头像网格：在线者边缘发光 -->
+          <div class="members-avatar-grid">
+            {#each allKnownMembers as m (m.userId)}
+              {@const isOnline = onlineUsers.some(u => u.userId === m.userId)}
+              <div class="member-avatar-card" class:online={isOnline} title="{m.username} · {ROLE_LABELS[m.role]}{#if isOnline} · 在线{/if}">
+                <div class="avatar avatar-md" style="background: {avatarColor(m.userId)}">{initialOf(m.username)}</div>
+                <span class="member-avatar-name">{m.username}{#if m.userId === userId}（我）{/if}</span>
+                <span class="member-avatar-role role-{m.role}">{ROLE_LABELS[m.role]}</span>
+                {#if isOnline}<span class="online-dot"></span>{/if}
+              </div>
+            {/each}
+          </div>
+
+          {#if can('manage_members')}
+            <div class="members-manage-section">
+              <div class="modal-subtitle">成员管理（仅统筹可见）</div>
+              <div class="members-add-row">
+                {#if candidateMembers.length > 0}
+                  <select bind:value={pickedCandidateUserId} title="从在线用户中选择">
+                    <option value="">— 在线用户 —</option>
+                    {#each candidateMembers as m (m.userId)}
+                      <option value={m.userId}>{m.username}</option>
+                    {/each}
+                  </select>
                 {/if}
-              {/each}
-            </select>
-            <button class="btn btn-primary" on:click={addMember}>添加</button>
-          </div>
+                <input type="text" bind:value={newMemberUsername} placeholder="或输入用户名（无在线用户时）" />
+                <select bind:value={newMemberRole}>
+                  {#each Object.entries(ROLE_LABELS) as [value, label]}
+                    {#if value !== 'owner'}
+                      <option value={value}>{label}</option>
+                    {/if}
+                  {/each}
+                </select>
+                <button class="btn btn-primary" on:click={addMember}>添加</button>
+              </div>
 
-          {#if memberOperationMsg}
-            <div class="member-op-msg">{memberOperationMsg}</div>
+              {#if memberOperationMsg}
+                <div class="member-op-msg">{memberOperationMsg}</div>
+              {/if}
+
+              <div class="members-table-wrap">
+                <table class="members-table">
+                  <thead>
+                    <tr><th>用户名</th><th>角色</th><th>加入时间</th><th>操作</th></tr>
+                  </thead>
+                  <tbody>
+                    {#each members as m (m.userId)}
+                      <tr>
+                        <td>
+                          <div class="member-cell">
+                            <div class="avatar avatar-sm" style="background: {avatarColor(m.userId)}">{initialOf(m.username)}</div>
+                            <span>{m.username}{#if m.userId === userId} <span class="me-tag">我</span>{/if}</span>
+                          </div>
+                        </td>
+                        <td>
+                          {#if m.role === 'owner'}
+                            <span class="role-badge role-owner">{ROLE_LABELS[m.role]}</span>
+                          {:else}
+                            <select
+                              value={m.role}
+                              on:change={(e) => changeMemberRole(m.userId, e.currentTarget.value as MemberRole)}
+                            >
+                              {#each Object.entries(ROLE_LABELS) as [value, label]}
+                                {#if value !== 'owner'}
+                                  <option value={value}>{label}</option>
+                                {/if}
+                              {/each}
+                            </select>
+                          {/if}
+                        </td>
+                        <td>{m.joinedAt ? new Date(m.joinedAt * 1000).toLocaleString() : '—'}</td>
+                        <td>
+                          {#if m.role !== 'owner'}
+                            <button class="btn btn-danger-sm" on:click={() => removeMember(m.userId, m.username)}>移除</button>
+                          {:else}
+                            <span class="hint">项目创建者</span>
+                          {/if}
+                        </td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           {/if}
-
-          <div class="members-table-wrap">
-            <table class="members-table">
-              <thead>
-                <tr><th>用户名</th><th>角色</th><th>加入时间</th><th>操作</th></tr>
-              </thead>
-              <tbody>
-                {#each members as m (m.userId)}
-                  <tr>
-                    <td>
-                      <div class="member-cell">
-                        <div class="avatar avatar-sm" style="background: {avatarColor(m.userId)}">{initialOf(m.username)}</div>
-                        <span>{m.username}{#if m.userId === userId} <span class="me-tag">我</span>{/if}</span>
-                      </div>
-                    </td>
-                    <td>
-                      {#if m.role === 'owner'}
-                        <span class="role-badge role-owner">{ROLE_LABELS[m.role]}</span>
-                      {:else}
-                        <select
-                          value={m.role}
-                          on:change={(e) => changeMemberRole(m.userId, e.currentTarget.value as MemberRole)}
-                        >
-                          {#each Object.entries(ROLE_LABELS) as [value, label]}
-                            {#if value !== 'owner'}
-                              <option value={value}>{label}</option>
-                            {/if}
-                          {/each}
-                        </select>
-                      {/if}
-                    </td>
-                    <td>{m.joinedAt ? new Date(m.joinedAt * 1000).toLocaleString() : '—'}</td>
-                    <td>
-                      {#if m.role !== 'owner'}
-                        <button class="btn btn-danger-sm" on:click={() => removeMember(m.userId, m.username)}>移除</button>
-                      {:else}
-                        <span class="hint">项目创建者</span>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-          </div>
 
           <div class="modal-actions">
             <button class="btn btn-cancel" on:click={() => showMembersModal = false}>关闭</button>
@@ -2335,4 +2529,123 @@
     transition: background 0.1s;
   }
   .context-item:hover { background: #f0f7ff; color: #0969da; }
+
+  /* ===== 成员头像网格（在线发光）===== */
+  .members-avatar-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 12px; padding: 12px 0; margin-bottom: 8px;
+    border-bottom: 1px solid #e1e4e8;
+  }
+  .member-avatar-card {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 12px 8px; background: #f6f8fa; border: 1px solid #e1e4e8;
+    border-radius: 8px; position: relative; transition: all 0.2s;
+  }
+  .member-avatar-card.online {
+    border-color: #2da44e;
+    box-shadow: 0 0 0 2px rgba(45,164,78,0.3), 0 0 12px rgba(45,164,78,0.4);
+  }
+  .avatar-md {
+    width: 44px; height: 44px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 600; font-size: 18px;
+  }
+  .member-avatar-card.online .avatar-md {
+    box-shadow: 0 0 0 3px rgba(45,164,78,0.5), 0 0 16px rgba(45,164,78,0.6);
+    animation: onlinePulse 2s ease-in-out infinite;
+  }
+  @keyframes onlinePulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(45,164,78,0.5), 0 0 16px rgba(45,164,78,0.6); }
+    50% { box-shadow: 0 0 0 5px rgba(45,164,78,0.3), 0 0 24px rgba(45,164,78,0.8); }
+  }
+  .member-avatar-name { font-size: 12px; color: #1a1a2e; font-weight: 500; text-align: center; }
+  .member-avatar-role { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #e1e4e8; color: #57606a; }
+  .member-avatar-role.role-owner { background: #fff8c5; color: #9a6700; }
+  .member-avatar-role.role-manager { background: #ddf4ff; color: #0969da; }
+  .member-avatar-role.role-reviewer { background: #dafbe1; color: #1a7f37; }
+  .online-dot {
+    position: absolute; top: 8px; right: 8px;
+    width: 8px; height: 8px; background: #2da44e; border-radius: 50%;
+    border: 2px solid #ffffff;
+  }
+  .members-manage-section { border-top: 1px solid #e1e4e8; padding-top: 16px; margin-top: 8px; }
+  .modal-subtitle { font-size: 13px; font-weight: 600; color: #57606a; margin-bottom: 8px; }
+
+  /* ===== 批注红点（左上角，悬停发光）===== */
+  .annotation-dot {
+    position: absolute; top: -2px; left: -2px;
+    background: none; border: none; color: #cf222e;
+    font-size: 12px; line-height: 1; cursor: pointer;
+    padding: 0; z-index: 5;
+    transition: all 0.2s ease;
+    text-shadow: 0 0 4px rgba(207,34,46,0.6);
+  }
+  .annotation-dot:hover {
+    transform: scale(1.6);
+    text-shadow: 0 0 8px rgba(207,34,46,1), 0 0 16px rgba(207,34,46,0.8);
+  }
+
+  /* ===== 批注便签条 ===== */
+  .annotation-overlay {
+    position: fixed; inset: 0; z-index: 150;
+    pointer-events: auto;
+  }
+  .annotation-line-svg {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 151;
+  }
+  .annotation-sticky {
+    position: fixed; z-index: 152;
+    width: 320px; max-height: 60vh;
+    background: #fffbeb; border: 1px solid #d29922;
+    border-radius: 8px; box-shadow: 0 8px 24px rgba(210,153,34,0.25);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .sticky-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 8px 12px; background: #fef3c7; border-bottom: 1px solid #d29922;
+  }
+  .sticky-title { font-size: 13px; font-weight: 600; color: #9a6700; }
+  .sticky-close {
+    background: none; border: none; font-size: 18px; cursor: pointer;
+    color: #9a6700; padding: 0; width: 24px; height: 24px; line-height: 1;
+  }
+  .sticky-close:hover { color: #cf222e; }
+  .sticky-list {
+    flex: 1; overflow-y: auto; padding: 8px 12px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .sticky-empty { color: #8c959f; font-size: 12px; text-align: center; padding: 16px 0; }
+  .sticky-comment {
+    background: #ffffff; border: 1px solid #e1e4e8; border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .sticky-comment.resolved { opacity: 0.55; }
+  .comment-head { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .comment-author { font-size: 12px; font-weight: 600; color: #1a1a2e; }
+  .comment-time { font-size: 10px; color: #8c959f; margin-left: auto; }
+  .resolved-tag { font-size: 10px; padding: 1px 5px; background: #1a7f37; color: white; border-radius: 3px; }
+  .comment-content { font-size: 12px; color: #1a1a2e; line-height: 1.5; word-break: break-word; }
+  .reply-list { margin-top: 6px; padding-left: 12px; border-left: 2px solid #e1e4e8; display: flex; flex-direction: column; gap: 4px; }
+  .reply-item { display: flex; gap: 6px; align-items: flex-start; }
+  .reply-body { display: flex; flex-direction: column; }
+  .reply-author { font-size: 11px; font-weight: 600; color: #57606a; }
+  .reply-content { font-size: 11px; color: #1a1a2e; }
+  .comment-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .reply-input-box { display: flex; gap: 4px; margin-top: 6px; align-items: center; }
+  .reply-input-box input {
+    flex: 1; padding: 4px 8px; background: #f6f8fa; border: 1px solid #d0d7de;
+    border-radius: 4px; font-size: 11px; color: #1a1a2e;
+  }
+  .sticky-input {
+    display: flex; gap: 6px; align-items: flex-start;
+    padding: 8px 12px; border-top: 1px solid #d29922; background: #fef3c7;
+  }
+  .sticky-input textarea {
+    flex: 1; padding: 6px 8px; background: #ffffff; border: 1px solid #d0d7de;
+    border-radius: 4px; font-size: 12px; color: #1a1a2e; font-family: inherit;
+    resize: vertical; min-height: 36px;
+  }
+  .sticky-input textarea:focus { outline: none; border-color: #0969da; }
 </style>
