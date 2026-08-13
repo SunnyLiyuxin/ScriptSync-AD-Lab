@@ -2007,7 +2007,7 @@
           <div class="members-avatar-grid">
             {#each allKnownMembers as m (m.userId)}
               {@const isOnline = onlineUsers.some(u => u.userId === m.userId)}
-              <div class="member-avatar-card" class:online={isOnline} title="{m.username} · {ROLE_LABELS[m.role]}{#if isOnline} · 在线{/if}">
+              <div class="member-avatar-card" class:online={isOnline} title={isOnline ? `${m.username} · ${ROLE_LABELS[m.role]} · 在线` : `${m.username} · ${ROLE_LABELS[m.role]}`}>
                 <div class="avatar avatar-md" style="background: {avatarColor(m.userId)}">{initialOf(m.username)}</div>
                 <span class="member-avatar-name">{m.username}{#if m.userId === userId}（我）{/if}</span>
                 <span class="member-avatar-role role-{m.role}">{ROLE_LABELS[m.role]}</span>
