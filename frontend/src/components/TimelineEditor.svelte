@@ -290,7 +290,11 @@
     // 后端 FFmpeg 已返回精确静音段时不再用前端估算覆盖；
     // 仅当波形已加载但静音段为空（例如后端 silencedetect 未跑或无静音）时降级估算
     if (waveform && events.length > 0 && silenceRegions.length === 0) {
-      silenceRegions = markOccupiedRegions(detectSilence(waveform.peaks, waveform.duration), events);
+      const detected = markOccupiedRegions(detectSilence(waveform.peaks, waveform.duration), events);
+      // 仅在检测到非空结果时写入，避免写入空数组后 effect 读取 silenceRegions 仍为 0 → 死循环
+      if (detected.length > 0) {
+        silenceRegions = detected;
+      }
     }
   });
 
@@ -701,7 +705,7 @@
     });
   }
 
-  // 在指定行下方插入空行（继承 layer/style，时间沿用该行终点）
+  // 在指定行下方插入空行（继承 layer/style，时间沿用当前行的 start/end 值）
   function insertRowBelow(eventId: string) {
     const target = events.find(x => x.id === eventId);
     if (!target) { contextMenu = null; return; }
@@ -709,7 +713,7 @@
     if (idx < 0) { contextMenu = null; return; }
     const newId = insertEventAt(doc, idx + 1, {
       layer: target.layer,
-      start: target.end,
+      start: target.start,
       end: target.end,
       style: target.style,
       text: '',
@@ -917,12 +921,8 @@
   }
 
   // 联动降级：取消「播放视频时自动高亮对应行」的实时联动。
-  // 保留 currentTime 与条目时间戳，未来只需恢复此 effect 即可启用联动。
-  // TODO(后续迭代): 恢复播放高亮 + 点击行跳转视频的联动。
-  // activeEventId 始终为 null，row.active 不再由播放位置触发。
-  $effect(() => {
-    activeEventId = null;
-  });
+  // activeEventId 始终保持 null（已初始化为 null），row.active 不再由播放位置触发。
+  // TODO(后续迭代): 恢复播放高亮 + 点击行跳转视频的联动时，在此处基于 currentTime 计算 activeEventId。
 
   // ===== 导入 ASS（含方案 B 自动归属）=====
   // ASS 自动归属规则（按优先级）：

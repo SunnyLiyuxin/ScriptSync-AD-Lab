@@ -554,11 +554,16 @@ export function importEventsMerge(
 export function exportEvents(doc: Y.Doc): AssEvent[] {
   const yEvents = doc.getArray<YEvent>('events');
   const result: AssEvent[] = [];
+  const seenIds = new Set<string>();
   for (let i = 0; i < yEvents.length; i++) {
     const e = yEvents.get(i);
     if ((e.get('_status') as EventStatus) === 'deleted') continue;
+    const id = e.get('id') as string;
+    // 防止重复 ID 导致 Svelte keyed-each 崩溃（IndexedDB 残留或并发插入可能产生重复）
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
     result.push({
-      id: e.get('id') as string,
+      id,
       layer: e.get('layer') as number,
       start: e.get('start') as number,
       end: e.get('end') as number,
