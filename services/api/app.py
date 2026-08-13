@@ -127,7 +127,28 @@ def init_db():
     );
     """)
     conn.commit()
+    # 兼容旧库：确保 invitations 表的列完整（老版本可能缺少某些列）
+    _migrate_invitations_table(conn)
     conn.close()
+
+
+def _migrate_invitations_table(conn):
+    """迁移：检查 invitations 表列是否存在，缺失则补建"""
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(invitations)").fetchall()}
+        if not cols:
+            return  # 表不存在，init_db 的 CREATE TABLE 会处理
+        if 'role' not in cols:
+            conn.execute("ALTER TABLE invitations ADD COLUMN role TEXT DEFAULT 'narrator'")
+        if 'max_uses' not in cols:
+            conn.execute("ALTER TABLE invitations ADD COLUMN max_uses INTEGER DEFAULT 0")
+        if 'use_count' not in cols:
+            conn.execute("ALTER TABLE invitations ADD COLUMN use_count INTEGER DEFAULT 0")
+        if 'revoked' not in cols:
+            conn.execute("ALTER TABLE invitations ADD COLUMN revoked INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception as e:
+        logger.warning(f"invitations 表迁移跳过: {e}")
 
 
 init_db()
@@ -532,30 +553,51 @@ def create_invitation(
     data: InvitationCreateRequest,
     ctx: dict = Depends(require_project_role('project_id', {'owner'})),
 ):
-    """生成邀请码（仅 owner 可调用）"""
+    """生成邀请码（仅 owner 可调用）
+
+    使用 secrets.token_urlsafe 生成字母数字混合的唯一随机邀请码，
+    存储至数据库并与当前项目ID绑定。
+    """
     if data.role not in {'manager', 'reviewer', 'narrator'}:
         raise HTTPException(400, "非法角色（邀请码不可生成 owner）")
-    code = _secrets.token_urlsafe(8)  # 8 字节 = ~11 字符
     now = int(time.time())
     expires_at = now + data.expires_in_hours * 3600
+    max_uses = data.max_uses if data.max_uses and data.max_uses > 0 else 0
     conn = get_db()
     try:
         # 校验项目存在
         proj = conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
         if not proj:
             raise HTTPException(404, "项目不存在")
+        # 生成唯一邀请码（最多重试 5 次防碰撞）
+        code = None
+        for _ in range(5):
+            candidate = _secrets.token_urlsafe(8)  # 8 字节 = ~11 字符，字母数字混合
+            existing = conn.execute(
+                "SELECT code FROM invitations WHERE code=?", (candidate,)
+            ).fetchone()
+            if not existing:
+                code = candidate
+                break
+        if not code:
+            raise HTTPException(500, "邀请码生成失败（多次碰撞，请重试）")
         conn.execute(
-            "INSERT INTO invitations (code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role) VALUES (?,?,?,?,?,0,0,0,?)",
-            (code, project_id, ctx['user']['userId'], now, expires_at, data.role),
+            "INSERT INTO invitations (code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role) VALUES (?,?,?,?,?,?,?,?,?)",
+            (code, project_id, ctx['user']['userId'], now, expires_at, max_uses, 0, 0, data.role),
         )
         conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"邀请码生成失败 project={project_id}: {type(e).__name__}: {e}")
+        raise HTTPException(500, f"邀请码生成失败: {e}")
     finally:
         conn.close()
     return {
         "code": code,
         "projectId": project_id,
         "expiresAt": expires_at,
-        "maxUses": data.max_uses,
+        "maxUses": max_uses,
         "role": data.role,
         "joinUrl": f"/?invite={code}",
     }

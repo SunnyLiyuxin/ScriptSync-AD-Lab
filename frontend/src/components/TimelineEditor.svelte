@@ -25,7 +25,7 @@
   import { type WaveformData } from '../lib/audio/audio-analyzer';
   import { detectSilence, markOccupiedRegions, type SilenceRegion } from '../lib/audio/silence-detector';
   import { findNextBlank, findPrevBlank } from '../lib/audio/jump-blank';
-  import { exportEvents, createEvent, insertEventAt, findEventIndex, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, deleteEventsBulk, addComment, getComments, addReply, resolveComment } from '../lib/collaboration/yjs-operations';
+  import { exportEvents, createEvent, insertEventAt, findEventIndex, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, deleteEventsBulk, collectDeletedSnapshots, restoreEvents, addComment, getComments, addReply, resolveComment, type DeletedEventSnapshot } from '../lib/collaboration/yjs-operations';
   import { lockEntry, unlockEntry, getLockHolder, getOnlineUsers, getOtherCursors } from '../lib/collaboration/awareness-lock';
   import { createShortcutManager, createDefaultShortcuts } from '../lib/shortcuts/shortcut-manager';
   import { recordEdit, getEditHistory } from '../lib/collaboration/edit-history';
@@ -125,6 +125,10 @@
   let assInput: HTMLInputElement | null = $state(null);
   let videoInput: HTMLInputElement | null = $state(null);
   let tableBodyEl: HTMLElement | null = $state(null);
+
+  // 批量删除撤销
+  let undoDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastDeletedSnapshots = $state<DeletedEventSnapshot[] | null>(null);
 
   const STATUS_LABELS: Record<EventStatus, string> = {
     draft: '初稿', needs_revision: '需修改', in_review: '审阅中',
@@ -730,18 +734,33 @@
     });
   }
 
-  // 批量硬删除已勾选条目（彻底从 Yjs 数组移除，用于清理导入的 ASS 字幕）
+  // 批量硬删除已勾选条目（从 Yjs 数组移除，支持撤销）
   function batchDelete() {
     if (checkedIds.size === 0) {
       alert('请先勾选要删除的字幕条目');
       return;
     }
-    if (!confirm(`确认彻底删除已勾选的 ${checkedIds.size} 条字幕？此操作不可恢复。`)) return;
+    if (!confirm(`确认删除已勾选的 ${checkedIds.size} 条字幕？删除后可通过提示条撤销。`)) return;
     const ids = Array.from(checkedIds);
+    // 先快照待删除事件（含原始索引+数据），供撤销使用
+    const snapshots = collectDeletedSnapshots(doc, ids);
     const deleted = deleteEventsBulk(doc, ids);
     checkedIds = new Set();
     if (selectedId && ids.includes(selectedId)) selectedId = null;
-    alert(`已删除 ${deleted} 条字幕`);
+    // 保存快照供撤销，10 秒后自动清除
+    lastDeletedSnapshots = snapshots;
+    if (undoDeleteTimer) clearTimeout(undoDeleteTimer);
+    undoDeleteTimer = setTimeout(() => { lastDeletedSnapshots = null; }, 10000);
+  }
+
+  // 撤销最近一次批量删除
+  function undoLastDelete() {
+    if (!lastDeletedSnapshots || lastDeletedSnapshots.length === 0) return;
+    const restored = restoreEvents(doc, lastDeletedSnapshots);
+    lastDeletedSnapshots = null;
+    if (undoDeleteTimer) { clearTimeout(undoDeleteTimer); undoDeleteTimer = null; }
+    // 可选提示
+    void restored;
   }
 
   // 进入编辑态时自动聚焦 textarea，并将光标定位到末尾
@@ -1851,6 +1870,14 @@
       </div>
     {/if}
 
+    <!-- 批量删除撤销提示条 -->
+    {#if lastDeletedSnapshots}
+      <div class="undo-toast">
+        <span>已删除 {lastDeletedSnapshots.length} 条字幕</span>
+        <button class="undo-btn" on:click={undoLastDelete}>撤销</button>
+      </div>
+    {/if}
+
     <!-- 设定我的范围 弹窗 -->
     {#if showRangeModal}
       <div class="modal-overlay" on:click|self={clearRange}>
@@ -2540,6 +2567,24 @@
   }
   .context-item:hover { background: #f0f7ff; color: #0969da; }
 
+  /* ===== 批量删除撤销提示条 ===== */
+  .undo-toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    z-index: 300;
+    background: #1a1a2e; color: #fff;
+    padding: 10px 20px; border-radius: 8px;
+    display: flex; align-items: center; gap: 12px;
+    font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    animation: slideUp 0.2s ease-out;
+  }
+  .undo-toast .undo-btn {
+    background: #0969da; color: white; border: none;
+    padding: 4px 14px; border-radius: 4px; font-size: 12px;
+    cursor: pointer; font-weight: 600;
+  }
+  .undo-toast .undo-btn:hover { background: #0860ca; }
+  @keyframes slideUp { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+
   /* ===== 成员头像网格（在线发光）===== */
   .members-avatar-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
@@ -2550,6 +2595,9 @@
     display: flex; flex-direction: column; align-items: center; gap: 4px;
     padding: 12px 8px; background: #f6f8fa; border: 1px solid #e1e4e8;
     border-radius: 8px; position: relative; transition: all 0.2s;
+  }
+  .member-avatar-card:not(.online) .avatar-md {
+    filter: grayscale(1) opacity(0.55);
   }
   .member-avatar-card.online {
     border-color: #2da44e;

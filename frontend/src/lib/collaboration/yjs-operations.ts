@@ -196,7 +196,7 @@ export function softDeleteEvent(doc: Y.Doc, eventId: string, currentUserId: stri
 
 /**
  * 批量硬删除（从 Yjs 数组中彻底移除，用于清理导入的 ASS 字幕）
- * 与 softDeleteEvent 不同：直接从 events 数组删除，不可恢复
+ * 与 softDeleteEvent 不同：直接从 events 数组删除
  * 单事务执行，避免多次广播
  * @returns 实际删除的条目数
  */
@@ -212,6 +212,75 @@ export function deleteEventsBulk(doc: Y.Doc, eventIds: string[]): number {
     }
     for (let j = indices.length - 1; j >= 0; j--) {
       events.delete(indices[j], 1);
+      count++;
+    }
+  });
+  return count;
+}
+
+/**
+ * 收集待删除事件的快照（含原始索引 + 完整数据），供撤销恢复使用
+ */
+export interface DeletedEventSnapshot {
+  index: number;
+  data: Partial<AssEvent>;
+}
+
+export function collectDeletedSnapshots(doc: Y.Doc, eventIds: string[]): DeletedEventSnapshot[] {
+  const events = doc.getArray<YEvent>('events');
+  const snapshots: DeletedEventSnapshot[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const e = events.get(i);
+    const id = e.get('id') as string;
+    if (eventIds.includes(id)) {
+      snapshots.push({
+        index: i,
+        data: {
+          id,
+          layer: e.get('layer') as number,
+          start: e.get('start') as number,
+          end: e.get('end') as number,
+          style: e.get('style') as string,
+          name: (e.get('name') as string) || '',
+          text: e.get('text') as string,
+          _status: e.get('_status') as EventStatus,
+          _assignedTo: (e.get('_assignedTo') as string | null) ?? null,
+          _owner: (e.get('_owner') as string | null) ?? null,
+          _needsRevisionBy: (e.get('_needsRevisionBy') as string | null) ?? null,
+          _needsRevisionByName: (e.get('_needsRevisionByName') as string | null) ?? null,
+        },
+      });
+    }
+  }
+  return snapshots;
+}
+
+/**
+ * 恢复已删除的事件（按原始索引升序逐条插入，保证位置正确）
+ */
+export function restoreEvents(doc: Y.Doc, snapshots: DeletedEventSnapshot[]): number {
+  const events = doc.getArray<YEvent>('events');
+  let count = 0;
+  // 按索引升序排序后逐条插入：每次插入只会影响后续索引，不影响前面
+  const sorted = [...snapshots].sort((a, b) => a.index - b.index);
+  doc.transact(() => {
+    for (const snap of sorted) {
+      const yMap = new Y.Map();
+      yMap.set('id', snap.data.id || nanoid());
+      yMap.set('layer', snap.data.layer ?? 1);
+      yMap.set('start', snap.data.start ?? 0);
+      yMap.set('end', snap.data.end ?? snap.data.start ?? 0);
+      yMap.set('style', snap.data.style || 'Narration');
+      yMap.set('name', snap.data.name || '');
+      yMap.set('text', snap.data.text || '');
+      yMap.set('_status', snap.data._status || 'draft');
+      yMap.set('_lockedBy', null);
+      yMap.set('_assignedTo', snap.data._assignedTo ?? null);
+      yMap.set('_owner', snap.data._owner ?? null);
+      yMap.set('_needsRevisionBy', snap.data._needsRevisionBy ?? null);
+      yMap.set('_needsRevisionByName', snap.data._needsRevisionByName ?? null);
+      const idx = Math.max(0, Math.min(snap.index, events.length));
+      events.insert(idx, [yMap]);
       count++;
     }
   });
