@@ -11,6 +11,9 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000
       - VITE_COLLAB_WS_URL=ws://localhost:1234
+      # Vite dev-server 代理目标（容器内需用服务名，非 localhost）
+      - VITE_PROXY_TARGET=http://api:8000
+      - VITE_PROXY_WS_TARGET=ws://collab:1234
     volumes:
       - ./frontend:/app
       - /app/node_modules

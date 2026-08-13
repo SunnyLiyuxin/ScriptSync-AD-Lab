@@ -53,6 +53,54 @@ export function createEvent(
 }
 
 /**
+ * 在指定索引处插入字幕条目（用于「插入上一行/下一行」右键菜单）
+ * 与 createEvent 不同：不按时间排序，而是精确插入到指定数组位置
+ * @param index 插入位置（0=最前，length=最后）
+ * @returns 新条目 id
+ */
+export function insertEventAt(
+  doc: Y.Doc,
+  index: number,
+  data: Partial<AssEvent>,
+): string {
+  const events = doc.getArray<YEvent>('events');
+  const id = data.id || nanoid();
+  const start = data.start ?? 0;
+
+  const yMap = new Y.Map();
+  yMap.set('id', id);
+  yMap.set('layer', data.layer ?? 1);
+  yMap.set('start', start);
+  yMap.set('end', data.end ?? start);
+  yMap.set('style', data.style || 'Narration');
+  yMap.set('name', data.name || '');
+  yMap.set('text', data.text || '');
+  yMap.set('_status', data._status || 'draft');
+  yMap.set('_lockedBy', null);
+  yMap.set('_assignedTo', data._assignedTo ?? null);
+  yMap.set('_owner', data._owner ?? null);
+  yMap.set('_needsRevisionBy', null);
+  yMap.set('_needsRevisionByName', null);
+
+  const clampedIndex = Math.max(0, Math.min(index, events.length));
+  events.insert(clampedIndex, [yMap]);
+  return id;
+}
+
+/**
+ * 按 ID 查找事件在 Yjs events 数组中的索引（用于精确插入位置）
+ * 注意：与 exportEvents 排序后的数组不同，此处返回的是原始 Yjs 数组索引
+ * @returns 索引，未找到返回 -1
+ */
+export function findEventIndex(doc: Y.Doc, eventId: string): number {
+  const events = doc.getArray<YEvent>('events');
+  for (let i = 0; i < events.length; i++) {
+    if ((events.get(i).get('id') as string) === eventId) return i;
+  }
+  return -1;
+}
+
+/**
  * 按 ID 查找事件
  */
 function findEvent(doc: Y.Doc, eventId: string): YEvent | null {
@@ -144,6 +192,30 @@ export function softDeleteEvent(doc: Y.Doc, eventId: string, currentUserId: stri
   e.set('_needsRevisionBy', null);
   e.set('_needsRevisionByName', null);
   return true;
+}
+
+/**
+ * 批量硬删除（从 Yjs 数组中彻底移除，用于清理导入的 ASS 字幕）
+ * 与 softDeleteEvent 不同：直接从 events 数组删除，不可恢复
+ * 单事务执行，避免多次广播
+ * @returns 实际删除的条目数
+ */
+export function deleteEventsBulk(doc: Y.Doc, eventIds: string[]): number {
+  const events = doc.getArray<YEvent>('events');
+  let count = 0;
+  doc.transact(() => {
+    // 收集要删除的索引（从大到小，避免删除时索引错位）
+    const indices: number[] = [];
+    for (let i = 0; i < events.length; i++) {
+      const id = events.get(i).get('id') as string;
+      if (eventIds.includes(id)) indices.push(i);
+    }
+    for (let j = indices.length - 1; j >= 0; j--) {
+      events.delete(indices[j], 1);
+      count++;
+    }
+  });
+  return count;
 }
 
 /**

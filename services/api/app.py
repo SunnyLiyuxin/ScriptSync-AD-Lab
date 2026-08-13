@@ -545,7 +545,7 @@ def create_invitation(
         if not proj:
             raise HTTPException(404, "项目不存在")
         conn.execute(
-            "INSERT INTO invitations (code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role) VALUES (?,?,?,?,?,0,0,?,?)",
+            "INSERT INTO invitations (code, project_id, created_by, created_at, expires_at, max_uses, use_count, revoked, role) VALUES (?,?,?,?,?,0,0,0,?)",
             (code, project_id, ctx['user']['userId'], now, expires_at, data.role),
         )
         conn.commit()

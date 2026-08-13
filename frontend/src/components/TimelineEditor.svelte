@@ -25,7 +25,7 @@
   import { type WaveformData } from '../lib/audio/audio-analyzer';
   import { detectSilence, markOccupiedRegions, type SilenceRegion } from '../lib/audio/silence-detector';
   import { findNextBlank, findPrevBlank } from '../lib/audio/jump-blank';
-  import { exportEvents, createEvent, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, addComment, getComments } from '../lib/collaboration/yjs-operations';
+  import { exportEvents, createEvent, insertEventAt, findEventIndex, updateText, updateTime, setStatus, importEvents, importEventsMerge, assignEvent, assignEventsBulk, softDeleteEvent, deleteEventsBulk, addComment, getComments } from '../lib/collaboration/yjs-operations';
   import { lockEntry, unlockEntry, getLockHolder, getOnlineUsers, getOtherCursors } from '../lib/collaboration/awareness-lock';
   import { createShortcutManager, createDefaultShortcuts } from '../lib/shortcuts/shortcut-manager';
   import { recordEdit, getEditHistory } from '../lib/collaboration/edit-history';
@@ -104,6 +104,9 @@
   // 内联批注：当前展开输入框的 eventId
   let inlineReviewEventId = $state<string | null>(null);
   let inlineReviewText = $state('');
+
+  // 右键上下文菜单：定位到某行，可「插入上一行/下一行」
+  let contextMenu = $state<{ eventId: string; x: number; y: number } | null>(null);
 
   // 上传状态
   let uploadingVideo = $state(false);
@@ -567,6 +570,73 @@
   function selectRow(e: AssEvent) {
     selectedId = e.id;
     // 联动降级：行点击仅选中，不触发视频跳转（保留时间戳供未来联动，见 TODO）
+  }
+
+  // ===== 右键上下文菜单：插入上一行/下一行 =====
+  function onRowContextMenu(e: AssEvent, ev: MouseEvent) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    selectedId = e.id;
+    contextMenu = { eventId: e.id, x: ev.clientX, y: ev.clientY };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  // 在指定行上方插入空行（继承 layer/style，时间沿用该行起点）
+  function insertRowAbove(eventId: string) {
+    const target = events.find(x => x.id === eventId);
+    if (!target) { contextMenu = null; return; }
+    // 在 Yjs 原始数组中查找真实索引（events 状态数组是排序后的，索引可能不一致）
+    const idx = findEventIndex(doc, eventId);
+    if (idx < 0) { contextMenu = null; return; }
+    const newId = insertEventAt(doc, idx, {
+      layer: target.layer,
+      start: target.start,
+      end: target.end,
+      style: target.style,
+      text: '',
+      _status: 'draft',
+      _assignedTo: userId,
+    });
+    selectedId = newId;
+    contextMenu = null;
+    scrollRowIntoView(newId);
+  }
+
+  // 在指定行下方插入空行（继承 layer/style，时间沿用该行终点）
+  function insertRowBelow(eventId: string) {
+    const target = events.find(x => x.id === eventId);
+    if (!target) { contextMenu = null; return; }
+    const idx = findEventIndex(doc, eventId);
+    if (idx < 0) { contextMenu = null; return; }
+    const newId = insertEventAt(doc, idx + 1, {
+      layer: target.layer,
+      start: target.end,
+      end: target.end,
+      style: target.style,
+      text: '',
+      _status: 'draft',
+      _assignedTo: userId,
+    });
+    selectedId = newId;
+    contextMenu = null;
+    scrollRowIntoView(newId);
+  }
+
+  // 批量硬删除已勾选条目（彻底从 Yjs 数组移除，用于清理导入的 ASS 字幕）
+  function batchDelete() {
+    if (checkedIds.size === 0) {
+      alert('请先勾选要删除的字幕条目');
+      return;
+    }
+    if (!confirm(`确认彻底删除已勾选的 ${checkedIds.size} 条字幕？此操作不可恢复。`)) return;
+    const ids = Array.from(checkedIds);
+    const deleted = deleteEventsBulk(doc, ids);
+    checkedIds = new Set();
+    if (selectedId && ids.includes(selectedId)) selectedId = null;
+    alert(`已删除 ${deleted} 条字幕`);
   }
 
   // 进入编辑态时自动聚焦 textarea，并将光标定位到末尾
@@ -1223,6 +1293,9 @@
   on:keydown={shortcutManager.handleKeyDown}
   on:visibilitychange={onVisibilityChange}
   on:beforeunload={onBeforeUnload}
+  on:click={closeContextMenu}
+  on:contextmenu={closeContextMenu}
+  on:scroll={closeContextMenu}
 />
 
 <div class="editor-layout" class:video-expanded={videoExpanded}>
@@ -1303,6 +1376,7 @@
           <input type="file" accept=".ass" on:change={onImportAss} hidden />
         </label>
         <button class="btn btn-tool" class:active={showBatchPanel} on:click={() => showBatchPanel = !showBatchPanel} title="批量选择与设状态">批量 ({checkedIds.size})</button>
+        <button class="btn btn-danger" on:click={batchDelete} title="批量删除已勾选条目（不可恢复）" disabled={checkedIds.size === 0}>删除 ({checkedIds.size})</button>
         {#if can('assign_work')}
           <button class="btn btn-tool" on:click={openAssignModal} title="批量指派（先勾选行）" disabled={checkedIds.size === 0}>
             指派 ({checkedIds.size})
@@ -1450,6 +1524,7 @@
               style="--status-color: {STATUS_COLORS[e._status]}; --cursor-color: {cursorUser?.color ?? 'transparent'}"
               on:click={() => selectRow(e)}
               on:dblclick={() => startEdit(e)}
+              on:contextmenu={(ev) => onRowContextMenu(e, ev)}
               role="button"
               tabindex="0"
             >
@@ -1581,6 +1656,14 @@
         </tbody>
       </table>
     </div>
+
+    <!-- 右键上下文菜单：插入上一行/下一行 -->
+    {#if contextMenu}
+      <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px">
+        <button class="context-item" on:click={() => insertRowAbove(contextMenu!.eventId)}>插入上一行</button>
+        <button class="context-item" on:click={() => insertRowBelow(contextMenu!.eventId)}>插入下一行</button>
+      </div>
+    {/if}
 
     <!-- 设定我的范围 弹窗 -->
     {#if showRangeModal}
@@ -1932,6 +2015,9 @@
   .btn-primary { background: #0969da; }
   .btn-primary:hover:not(:disabled) { background: #0860c7; }
   .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.btn-danger { background: #cf222e; }
+  .btn.btn-danger:hover:not(:disabled) { background: #a40e26; }
+  .btn.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-cancel { background: #e1e4e8; color: #57606a; }
   .btn-cancel:hover { background: #d0d7de; }
   .btn-small { padding: 3px 8px; font-size: 11px; background: #0969da; }
@@ -2234,4 +2320,19 @@
     color: #8c959f; cursor: pointer; line-height: 1;
   }
   .panel-close:hover { color: #cf222e; }
+
+  /* 右键上下文菜单 */
+  .context-menu {
+    position: fixed; z-index: 200;
+    background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+    padding: 4px 0; min-width: 140px;
+  }
+  .context-item {
+    display: block; width: 100%; text-align: left;
+    background: none; border: none; color: #1a1a2e;
+    padding: 8px 14px; font-size: 13px; cursor: pointer;
+    transition: background 0.1s;
+  }
+  .context-item:hover { background: #f0f7ff; color: #0969da; }
 </style>
