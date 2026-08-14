@@ -22,6 +22,8 @@
 
 [URL](http://116.62.139.39:5173/)：http://116\.62\.139\.39:5173/
 
+迭代计划：<img width="2254" height="883" alt="image" src="https://github.com/user-attachments/assets/d861f414-644f-4da6-a736-4ee08eab1863" />
+
 ### 1\.1 口述影视是什么？我是谁 ？我们是谁 ？
 
 #### · 口述员的工作，可以用一条音轨时间轴说清楚：
@@ -50,27 +52,9 @@
 #### ·我们是谁 ？
 
 在深圳，共感 Lab 团队由李柳玲、王孟琦创立，一直在福田、宝安、南山等地组织口述影像活动以及口述员的公益培训，他们创建了一支共感无障碍志愿者队伍，以声音为笔，以文字为墨，打破光影壁垒，守护每一份观影期待。
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=MTdkMWRlNjNjYThhY2ZmOGQyMWE0NTU5ZjE3MzZjYzFfZmZhYmYwNDhiNGMxM2VkMzU1N2RjN2VkYjM0ZDg3NWNfSUQ6NzY3MzQ2MTAyMDE3ODQzNTI3Ml8xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=YjNmMThkMGU2MGU5YTdjZGZhNWUzNTVhZThiZjJmNzBfOTE4MDQxOGU3MmM3MjI4ZGU2YTNlNmRiMDY0OGExZmJfSUQ6NzY3MzQ3NjEyNDgxMDE1MjkwN18xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=OTllODY3NjBkODM3MGI4NTY1NTAxNzYyZDk0ZjA3MzhfMTY0ZjhkZjM4Mzk4Yzg1MTMxODk4MzY0YTZlZDUzMzJfSUQ6NzY3MzQ3NjMzMzg1MDI4Mjk3N18xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
-
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=NDE1MTUwOWU0NmVjNDc4ZjlhZWM2NWRjMDlmYzhjZDBfODc5YjRlZjNkM2M1Y2ExMjY0OTFjMzNkZWQ2NGZjY2ZfSUQ6NzY3MzQ2MjE0Mjc0OTcwNzQ4Ml8xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
 > 公众号：共感实验室 AD\-Lab
-> 
-> 
 
 大一时，我也曾作为口述员亲身参与过筹备、主持、口述的全流程,当过导盲员，和视障人士接触与沟通，听过他们内心的声音，切身参与过无障碍视听的公益行动中。
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=OGY0YzEzNGM3Yjc1ZThlZDBhNGQyYzM5ZDliOGVkNGZfNzI5MzE5ZDQ5YWM4MzY0ZjQwOWY0MjQ1Y2ZhMWY5YTNfSUQ6NzY3MzQ2MzU0ODk5NTA5NTg1MF8xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
-![Image](https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/authcode/?code=YWNiNjI3M2FiODMwZDQ0MjFlMjk5ZmUwMjFmNTQ0YzBfZTg5MjZlYWRjM2ZjMzA5MWM2NTY5NGI4Mzg2OThlMzhfSUQ6NzY3MzQ2MzkwMzMzODIzNjg1Nl8xNzg2Njc5NDIwOjE3ODY3NjU4MjBfVjM)
-
 
 
 ### 1\.2 我们看到了什么问题
